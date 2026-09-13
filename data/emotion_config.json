@@ -1,0 +1,42 @@
+{
+	"baseline": "CALM",
+	"decay_per_second": 0.15,
+	"intensity_threshold": 0.05,
+	"emotions": {
+		"CALM":  { "expr": "Idle",           "desc": "平静（基线，默认表情）" },
+		"HAPPY": { "expr": "SmileEyeClosed", "desc": "开心（闭眼笑）" },
+		"SHY":   { "expr": "Silence",        "desc": "害羞 / 被摸到敏感部位时的扭捏沉默" },
+		"ANGRY": { "expr": "DockPopAngry",   "desc": "生气 / 炸毛" }
+	},
+	"zone_triggers": {
+		"头":   { "emotion": "HAPPY", "pos": 0.5,  "neg": 0.3 },
+		"手":   { "emotion": "HAPPY", "pos": 0.4,  "neg": 0.2 },
+		"胸":   { "emotion": "SHY",   "pos": 0.4,  "neg": 0.6 },
+		"腿":   { "emotion": "SHY",   "pos": 0.3,  "neg": 0.6 },
+		"衣服": { "emotion": "SHY",   "pos": 0.25, "neg": 0.5 }
+	},
+	"stage_triggers": {
+		"p1": { "emotion": "CALM",  "intensity": 0.3 },
+		"p2": { "emotion": "CALM",  "intensity": 0.3 },
+		"p3": { "emotion": "SHY",   "intensity": 0.5 },
+		"p4": { "emotion": "HAPPY", "intensity": 0.5 },
+		"p5": { "emotion": "HAPPY", "intensity": 0.7 },
+		"p6": { "emotion": "SHY",   "intensity": 0.5 }
+	},
+	"emotion_animations": {
+		"CALM":  "Idle",
+		"HAPPY": "Idle",
+		"SHY":   "Idle",
+		"ANGRY": "Idle"
+	},
+	"anim_zone_key": {
+		"头": "Head", "胸": "Chest", "手": "Hand", "腿": "Leg", "衣服": "Clothes"
+	},
+	"motion_template": "{zone}_L{intensity}",
+	"energy_per_interact": 0.34,
+	"energy_decay_per_sec": 0.1,
+	"voice_template": "res://audio/voice/{phase}_{zone}_{emotion}.wav",
+	"angry_threshold": -8,
+	"angry_amount": 0.6,
+	"peak_lock_seconds": 6
+}

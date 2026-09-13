@@ -1,0 +1,44 @@
+{
+  "speaker": "MO",
+  "default": [
+    {"name": "MO", "text": "嗯？你是在叫我吗～", "expr": "", "voice": ""}
+  ],
+  "头": [
+    {"name": "MO", "text": "头1：别乱摸头啦～", "expr": "", "voice": ""},
+    {"name": "MO", "text": "头2：头发会被你弄乱的！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "头3：乖，就让你摸一下下～", "expr": "", "voice": ""}
+  ],
+  "胸": [
+    {"name": "MO", "text": "胸1：喂喂，这里不行啦！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "胸2：你再这样我要生气了！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "胸3：哼，色狼！", "expr": "", "voice": ""}
+  ],
+  "手": [
+    {"name": "MO", "text": "手1：牵手的话……倒是可以。", "expr": "", "voice": ""},
+    {"name": "MO", "text": "手2：手心有点痒呢。", "expr": "", "voice": ""},
+    {"name": "MO", "text": "手3：嘿嘿，你的手好温暖。", "expr": "", "voice": ""}
+  ],
+  "屁股": [
+    {"name": "MO", "text": "变态1：你、你摸屁股干嘛！！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "变态2：呜……色狼，离我远点！！", "expr": "", "voice": ""}
+  ],
+  "阴部": [
+    {"name": "MO", "text": "变态1！那里是禁区！不准碰！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "变态2！我要叫了！你个死变态！！", "expr": "", "voice": ""}
+  ],
+  "腿": [
+    {"name": "MO", "text": "腿1：腿、腿别碰啦！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "腿2：再摸我就踢你哦！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "腿3：……你手放哪呢！", "expr": "", "voice": ""}
+  ],
+  "足部": [
+    {"name": "MO", "text": "足部1：脚、脚踝有点敏感啦！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "足部2：别挠我脚心！哈哈哈！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "足部3：鞋子都要被你摸掉了……", "expr": "", "voice": ""}
+  ],
+  "衣服": [
+    {"name": "MO", "text": "衣服1：衣服很贵的，别拉！", "expr": "", "voice": ""},
+    {"name": "MO", "text": "衣服2：这件校服可是很珍视的。", "expr": "", "voice": ""},
+    {"name": "MO", "text": "衣服3：你、你在看哪里啊！", "expr": "", "voice": ""}
+  ]
+}

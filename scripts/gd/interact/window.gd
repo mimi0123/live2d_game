@@ -1,0 +1,210 @@
+extends Node2D
+
+@export var enable_window_drag:bool = false
+@export var enable_docking: bool = false
+@export var model: GDCubismUserModel
+@export var anim_controller: AnimationController
+@export var dock_thresh:float = 0.3
+@export var dock_offset:float = -0.1
+@export var dock_pop_offset:int = 380
+@export var dock_pop_expression_reset_time:float = 30
+
+const STEP_SIZE = 0.05
+const MIN_SCALE = 0.1
+const CAM_ZOOM_MIN = 0.05
+const CAM_ZOOM_MAX = 6.0
+const ZOOM_FACTOR = 1.1   # 每格滚轮的缩放倍率（>1 放大；<1 缩小）
+const DOCK_LEFT = 0
+const DOCK_RIGHT = 1
+const DOCK_NONE = 2
+
+@onready var BASE_WINDOW_WIDTH = get_tree().root.get_size().x
+@onready var BASE_WINDOW_HEIGHT = get_tree().root.get_size().y
+@onready var mouseTracker = get_node("/root/MouseTracker")
+@onready var windowManager = get_node("/root/WindowManager")
+@onready var mouseDetection = get_node("/root/MouseDetection")
+@onready var config = get_node("/root/Config")
+
+var dragging: bool = false
+var docking: bool = false
+var docking_dir: int = DOCK_NONE
+var docking_time_counter:TimeCounter = TimeCounter.new(dock_pop_expression_reset_time)
+
+var window_scale: float = 1.0
+var drag_start_mouse_pos: Vector2i
+var drag_start_window_pos: Vector2i
+
+var is_other_app_fullscreen = false
+
+signal window_scale_changed
+signal window_pos_changed
+signal other_app_fullscreen
+signal window_middle_click
+signal window_docking
+
+func _ready() -> void:
+	load_config()
+	bind_signals()
+	#set_up_fullscreen_detector()  # BUG: 暂时不开启
+	update_window_size()
+	
+	add_child(docking_time_counter)
+	mouseDetection.connect("MouseEntered", docking_time_counter.increase)
+	
+func _physics_process(delta: float) -> void:
+	dock_pop()
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		# Window dragging
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			if event.pressed:
+				if enable_window_drag and not $GDCubismUserModel/Animation/EffectRandMove.is_moving:
+					dragging = true
+					drag_start_mouse_pos = mouseTracker.GetMousePosition()
+					drag_start_window_pos = get_tree().root.position
+			else:
+				dragging = false
+				window_pos_changed.emit("window_pos", get_tree().root.position)
+				
+		if event.button_index == MOUSE_BUTTON_MIDDLE:
+			if event.pressed and not docking:
+				window_middle_click.emit()
+		
+		# 滚轮缩放：以鼠标当前位置为中心放大/缩小（窗口分辨率不变）
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_zoom_at_cursor(event.position, ZOOM_FACTOR)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_zoom_at_cursor(event.position, 1.0 / ZOOM_FACTOR)
+	
+	if event is InputEventMouseMotion and dragging:
+		var cur_mouse_pos = mouseTracker.GetMousePosition()
+		var delta_pos = cur_mouse_pos - drag_start_mouse_pos
+		var new_position = drag_start_window_pos + delta_pos
+		if enable_docking:
+			new_position = dock_to_edge(Rect2i(new_position, DisplayServer.window_get_size()), dock_thresh, dock_offset)
+		get_tree().root.position = new_position
+
+func increase_window_size():
+	window_scale += STEP_SIZE
+	update_window_size()
+
+## 鼠标滚轮：以光标位置为中心缩放视图（改 Camera2D.zoom，保持模型 scale=1.0 以便点击命中准确）
+func zoom_model(factor: float) -> void:
+	_zoom_at_cursor(get_viewport().get_mouse_position(), factor)
+
+## 以屏幕坐标 screen_pos 为中心缩放：让该点下的内容保持不动（zoom-to-cursor）
+func _zoom_at_cursor(screen_pos: Vector2, factor: float) -> void:
+	var cam := get_cam()
+	if cam == null:
+		return
+	var new_zoom := clampf(cam.zoom.x * factor, CAM_ZOOM_MIN, CAM_ZOOM_MAX)
+	if abs(new_zoom - cam.zoom.x) < 0.0001:
+		return
+	# 缩放前：鼠标下方的世界坐标
+	var world_before: Vector2 = get_viewport().get_canvas_transform().affine_inverse() * screen_pos
+	cam.zoom = Vector2(new_zoom, new_zoom)
+	# 缩放后：同一屏幕点对应的世界坐标，用相机位移抵消差值 -> 该点保持不动
+	var world_after: Vector2 = get_viewport().get_canvas_transform().affine_inverse() * screen_pos
+	cam.position += world_before - world_after
+
+func get_cam() -> Camera2D:
+	var scene = get_tree().current_scene
+	if scene == null:
+		return null
+	return scene.get_node_or_null("Camera2D")
+	
+func decrease_window_size():
+	if window_scale < MIN_SCALE:
+		return
+	elif window_scale > MIN_SCALE:
+		window_scale -= STEP_SIZE
+		
+	update_window_size()
+
+func update_window_size():
+	# 计算新的窗口尺寸
+	var new_width = int(BASE_WINDOW_WIDTH * window_scale)
+	var new_height = int(BASE_WINDOW_HEIGHT * window_scale)
+	
+	# 更新主视窗的大小
+	get_tree().root.set_size(Vector2i(new_width, new_height))
+	if enable_docking:
+		var new_position = dock_to_edge(Rect2i(get_tree().root.position, DisplayServer.window_get_size()), dock_thresh, dock_offset)
+		get_tree().root.position = new_position
+	
+func load_config():
+	window_scale = config.get_window_config("window_scale", window_scale)
+	get_tree().root.position = config.get_window_config("window_pos", get_tree().root.position)
+	
+func bind_signals():
+	window_scale_changed.connect(config.on_window_config_change)
+	window_pos_changed.connect(config.on_window_config_change)
+	other_app_fullscreen.connect($GUI/Toolbar._on_other_app_fullscreen)
+
+func set_up_fullscreen_detector():
+	var timer = Timer.new()
+	timer.process_mode = Node.PROCESS_MODE_ALWAYS
+	timer.wait_time = 0.5
+	timer.timeout.connect(_check_other_app_fullscreen)
+	add_child(timer)
+	timer.start()
+	
+func dock_to_edge(window_rect: Rect2i, thresh: float, offset: float):
+	var center_pos = window_rect.position.x + window_rect.size.x / 2
+	
+	var screen_width = windowManager.GetSystemMetrics(78)
+	var thresh_pixel = window_rect.size.x * thresh
+	var offset_pixel = window_rect.size.x * offset
+	
+	if center_pos - thresh_pixel < 0:
+		model.set_rotation_degrees(85)
+		model.Body_group = 0
+		docking = true
+		docking_dir = DOCK_LEFT
+		model.flip_h = false
+		window_docking.emit(true, DOCK_LEFT)
+		return Vector2i(-window_rect.size.x / 2 + offset_pixel, window_rect.position.y)
+	elif center_pos + thresh_pixel > screen_width:
+		model.set_rotation_degrees(-95)
+		model.Body_group = 0
+		docking = true
+		docking_dir = DOCK_RIGHT
+		model.flip_h = false
+		window_docking.emit(true, DOCK_RIGHT)
+		return Vector2i(screen_width - window_rect.size.x / 2 - offset_pixel, window_rect.position.y)
+	else:
+		model.set_rotation_degrees(0)
+		model.Body_group = 1
+		docking = false
+		docking_dir = DOCK_NONE
+		window_docking.emit(false, DOCK_NONE)
+		anim_controller.set_expression("Idle")
+		docking_time_counter.reset()
+		return window_rect.position
+
+func dock_pop():
+	if docking:
+		if mouseDetection.mouse_hovered:
+			if docking_dir == DOCK_LEFT:
+				model.position.x = dock_pop_offset
+			elif docking_dir == DOCK_RIGHT:
+				model.position.x = -dock_pop_offset
+			
+			var count = docking_time_counter.get_count()
+			if count >= 6:
+				anim_controller.set_expression("DockPopAngry")
+			elif count >= 3:
+				anim_controller.set_expression("Doubt")
+		else:
+			anim_controller.set_expression("Idle")
+			model.position.x = 0
+	else:
+		model.position.x = 0
+		
+func _check_other_app_fullscreen():
+	var state = windowManager.IsOtherAppFullscreen()
+	if state != is_other_app_fullscreen:
+		other_app_fullscreen.emit(state)
+	is_other_app_fullscreen = state
+	

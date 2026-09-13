@@ -1,0 +1,30 @@
+# Godot generated / cache
+.godot/
+.vs/
+.vscode/
+.idea/
+/export/
+*.import
+*.uid
+
+# Big assets (size / copyright)
+engine/
+models/
+audio/
+
+# Licensed font (MS YaHei) - Godot falls back to default font
+fonts/
+
+# Godot local editor config / user data
+Godot/
+
+# Probe / test runtime output
+_*.txt
+*.log
+
+# Local config
+config.ini
+
+# OS
+Thumbs.db
+Desktop.ini

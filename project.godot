@@ -1,0 +1,69 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="Live2D 互动游戏"
+run/main_scene="uid://gfuvhyo1xjl4"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+run/max_fps=60
+run/low_processor_mode=false
+boot_splash/bg_color=Color(0, 0, 0, 0)
+boot_splash/show_image=false
+config/icon="uid://dbgr0uu8hus3f"
+
+[autoload]
+
+MouseTracker="*res://scripts/gd/win/MouseTracker.gd"
+Config="*res://scripts/gd/utils/config_manager.gd"
+WindowManager="*res://scripts/gd/win/WindowManager.gd"
+MouseDetection="*res://scripts/gd/win/MouseDetection.gd"
+AutoStarter="*res://scripts/gd/win/AutoStarter.gd"
+Dialogue="*res://scripts/gd/dialogue/dialogue_manager.gd"
+Emotion="*res://scripts/gd/emotion/emotion_manager.gd"
+RegionDetector="*res://scripts/gd/region/region_detector.gd"
+ScreenDeform="*res://scripts/gd/region/screen_deform.gd"
+DeformMenu="*res://scripts/gd/region/deform_menu.gd"
+HoverPanel="*res://scripts/gd/ui/hover_panel.gd"
+DebugPanel="*res://scripts/gd/debug/debug_panel.gd"
+RhythmGame="*res://scripts/gd/rhythm/rhythm_game.gd"
+
+[display]
+
+window/size/viewport_width=640
+window/size/viewport_height=640
+window/size/borderless=false
+window/size/transparent=false
+window/subwindows/embed_subwindows=false
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/per_pixel_transparency/allowed=false
+window/vsync/vsync_mode=0
+
+[rendering]
+
+environment/defaults/default_clear_color=Color(0.09, 0.10, 0.16, 1)
+
+[file_customization]
+
+folder_colors={
+"res://export/": "gray"
+}
+
+[physics]
+
+2d/run_on_separate_thread=true
+3d/run_on_separate_thread=true
+common/physics_ticks_per_second=30
+
+[rendering]
+
+renderer/rendering_method="mobile"
+anti_aliasing/dynamic_fonts/use_oversampling=true

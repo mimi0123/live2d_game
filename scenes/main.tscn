@@ -1,0 +1,434 @@
+[gd_scene load_steps=43 format=3 uid="uid://gfuvhyo1xjl4"]
+
+[ext_resource type="Script" uid="uid://bq5jct0umnoci" path="res://scripts/gd/interact/window.gd" id="1_o5qli"]
+[ext_resource type="Script" uid="uid://c2wvqwfnqa3u2" path="res://scripts/gd/attributes/model.gd" id="2_o6xl0"]
+[ext_resource type="Script" uid="uid://dbn2jhsak0hwb" path="res://scripts/gd/anim/anim_controller.gd" id="3_dp3eg"]
+[ext_resource type="Texture2D" uid="uid://cyk1dyk06dcnd" path="res://images/icons/particle/glint.png" id="3_tipki"]
+[ext_resource type="Script" uid="uid://bri3vn5pspsi2" path="res://scripts/gd/anim/eye_blink.gd" id="4_0ld40"]
+[ext_resource type="Script" uid="uid://bvucecetwdshi" path="res://scripts/gd/anim/rand_move.gd" id="4_jscy8"]
+[ext_resource type="PackedScene" uid="uid://ds5lu7v53sebb" path="res://prefabs/tray.tscn" id="4_jyhfs"]
+[ext_resource type="Script" uid="uid://na4yb7kbl3kf" path="res://scripts/gd/anim/mouse_follow.gd" id="4_yc10j"]
+[ext_resource type="Script" uid="uid://1msy678q0bqk" path="res://scripts/gd/anim/touch.gd" id="5_gqmmt"]
+[ext_resource type="Animation" uid="uid://pxtbljopfqfp" path="res://anim/motion/idle.res" id="7_ya4ey"]
+[ext_resource type="AnimationLibrary" uid="uid://b65uvc584nsx" path="res://anim/expression.res" id="7_yc10j"]
+[ext_resource type="Animation" uid="uid://bb0ycu28uso17" path="res://anim/motion/run.res" id="8_eb6dy"]
+[ext_resource type="Animation" uid="uid://dmweo0rigp8v4" path="res://anim/motion/head_up.res" id="9_jkv2x"]
+[ext_resource type="Animation" uid="uid://4rxpubx3cu8t" path="res://anim/motion/head_down.res" id="10_jbj1t"]
+[ext_resource type="Animation" uid="uid://cjrqb3pqf8ehp" path="res://anim/motion/head_left_up.res" id="11_gqmmt"]
+[ext_resource type="Animation" uid="uid://psodookd5gwl" path="res://anim/motion/head_left.res" id="11_muem4"]
+[ext_resource type="Animation" uid="uid://q4ebxija1jr7" path="res://anim/motion/head_right.res" id="12_dp3eg"]
+[ext_resource type="Animation" uid="uid://b6iipw6py2247" path="res://anim/motion/head_left_down.res" id="12_yc10j"]
+[ext_resource type="Animation" uid="uid://4tgpixkcwv1b" path="res://anim/motion/head_right_up.res" id="13_jscy8"]
+[ext_resource type="Animation" uid="uid://i5t1qhnbveql" path="res://anim/motion/head_right_down.res" id="14_pm3ni"]
+[ext_resource type="AnimationNodeBlendTree" uid="uid://d3nttjxnggxbs" path="res://anim/anim_tree/main.tres" id="17_y6deb"]
+[ext_resource type="Texture2D" uid="uid://dllyoqio0yr7r" path="res://images/icons/particle/heart.svg" id="21_og1vs"]
+[ext_resource type="Script" uid="uid://dq47pxgsd8bqq" path="res://scripts/gd/anim/hit_area_handler.gd" id="21_pm3ni"]
+[ext_resource type="Script" path="res://scripts/gd/soft/touch_manager.gd" id="26_soft_touch"]
+[ext_resource type="Script" path="res://scripts/gd/soft/mesh_deformer.gd" id="27_soft_deformer"]
+[ext_resource type="Script" path="res://scripts/gd/soft/hand_rig.gd" id="28_soft_hand"]
+[ext_resource type="Script" path="res://scripts/gd/soft/shadow_field.gd" id="29_shadow_field"]
+[ext_resource type="Texture2D" path="res://assets/touch_shadows/common/palm_soft.png" id="30_sh_palm"]
+[ext_resource type="Texture2D" path="res://assets/touch_shadows/common/fingertip_01.png" id="31_sh_f1"]
+[ext_resource type="Texture2D" path="res://assets/touch_shadows/common/fingertip_02.png" id="32_sh_f2"]
+[ext_resource type="Texture2D" path="res://assets/touch_shadows/common/fingertip_03.png" id="33_sh_f3"]
+[ext_resource type="Texture2D" path="res://assets/touch_shadows/common/fingertip_04.png" id="34_sh_f4"]
+[ext_resource type="Texture2D" path="res://assets/touch_shadows/common/fingertip_05.png" id="35_sh_f5"]
+[ext_resource type="Script" uid="uid://dp1nh8pm67yer" path="res://scripts/gd/ui/gui.gd" id="24_2wyq8"]
+[ext_resource type="PackedScene" uid="uid://cun7rhkorhmln" path="res://prefabs/tool_bar.tscn" id="25_og1vs"]
+
+[sub_resource type="Animation" id="Animation_jscy8"]
+length = 0.001
+tracks/0/type = "bezier"
+tracks/0/imported = false
+tracks/0/enabled = true
+tracks/0/path = NodePath(".:ParamEyeROpen")
+tracks/0/interp = 1
+tracks/0/loop_wrap = true
+tracks/0/keys = {
+"handle_modes": PackedInt32Array(0),
+"points": PackedFloat32Array(1, -0.25, 0, 0.25, 0),
+"times": PackedFloat32Array(0)
+}
+tracks/1/type = "bezier"
+tracks/1/imported = false
+tracks/1/enabled = true
+tracks/1/path = NodePath(".:ParamEyeLOpen")
+tracks/1/interp = 1
+tracks/1/loop_wrap = true
+tracks/1/keys = {
+"handle_modes": PackedInt32Array(0),
+"points": PackedFloat32Array(1, -0.25, 0, 0.25, 0),
+"times": PackedFloat32Array(0)
+}
+tracks/2/type = "value"
+tracks/2/imported = false
+tracks/2/enabled = true
+tracks/2/path = NodePath(".:AnimLoading2")
+tracks/2/interp = 1
+tracks/2/loop_wrap = true
+tracks/2/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [1.0]
+}
+tracks/3/type = "value"
+tracks/3/imported = false
+tracks/3/enabled = true
+tracks/3/path = NodePath(".:AnimLoading1")
+tracks/3/interp = 1
+tracks/3/loop_wrap = true
+tracks/3/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [0.0]
+}
+tracks/4/type = "value"
+tracks/4/imported = false
+tracks/4/enabled = true
+tracks/4/path = NodePath(".:AnimLine")
+tracks/4/interp = 1
+tracks/4/loop_wrap = true
+tracks/4/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [1.0]
+}
+tracks/5/type = "value"
+tracks/5/imported = false
+tracks/5/enabled = true
+tracks/5/path = NodePath(".:ParamExpEyeHighlights")
+tracks/5/interp = 1
+tracks/5/loop_wrap = true
+tracks/5/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [1.0]
+}
+
+[sub_resource type="AnimationLibrary" id="AnimationLibrary_og1vs"]
+_data = {
+&"RESET": SubResource("Animation_jscy8")
+}
+
+[sub_resource type="AnimationLibrary" id="AnimationLibrary_2wyq8"]
+_data = {
+&"head_down": ExtResource("10_jbj1t"),
+&"head_left": ExtResource("11_muem4"),
+&"head_left_down": ExtResource("12_yc10j"),
+&"head_left_up": ExtResource("11_gqmmt"),
+&"head_right": ExtResource("12_dp3eg"),
+&"head_right_down": ExtResource("14_pm3ni"),
+&"head_right_up": ExtResource("13_jscy8"),
+&"head_up": ExtResource("9_jkv2x"),
+&"idle": ExtResource("7_ya4ey"),
+&"run": ExtResource("8_eb6dy")
+}
+
+[sub_resource type="Curve" id="Curve_o6xl0"]
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(0.807843, 1), 0.0, 0.0, 0, 0, Vector2(1, 0), -10.2288, 0.0, 0, 0]
+point_count = 3
+
+[sub_resource type="CurveTexture" id="CurveTexture_tipki"]
+curve = SubResource("Curve_o6xl0")
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_85g3d"]
+particle_flag_disable_z = true
+emission_shape = 6
+emission_ring_axis = Vector3(0, 0, 1)
+emission_ring_height = 1.0
+emission_ring_radius = 600.0
+emission_ring_inner_radius = 400.0
+emission_ring_cone_angle = 90.0
+angle_min = 1.07288e-05
+angle_max = 1.07288e-05
+gravity = Vector3(0, -128, 0)
+radial_accel_min = -2.23517e-06
+radial_accel_max = -2.23517e-06
+tangential_accel_min = -2.23517e-06
+tangential_accel_max = -2.23517e-06
+scale_max = 3.0
+alpha_curve = SubResource("CurveTexture_tipki")
+
+[sub_resource type="Curve" id="Curve_85g3d"]
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(0.745098, 1), -6.20375e-07, -6.20375e-07, 0, 0, Vector2(1, 0), -5.94279, 0.0, 0, 0]
+point_count = 3
+
+[sub_resource type="CurveTexture" id="CurveTexture_choun"]
+curve = SubResource("Curve_85g3d")
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_ya4ey"]
+particle_flag_disable_z = true
+emission_shape = 6
+emission_ring_axis = Vector3(0, 0, 1)
+emission_ring_height = 1.0
+emission_ring_radius = 600.0
+emission_ring_inner_radius = 200.0
+emission_ring_cone_angle = 90.0
+gravity = Vector3(0, 0, 0)
+scale_max = 2.0
+alpha_curve = SubResource("CurveTexture_choun")
+
+[node name="Node2D" type="Node2D" node_paths=PackedStringArray("model", "anim_controller")]
+script = ExtResource("1_o5qli")
+model = NodePath("GDCubismUserModel")
+anim_controller = NodePath("GDCubismUserModel/Animation")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+zoom = Vector2(0.3, 0.3)
+
+[node name="SoftTouch" type="Node" parent="." node_paths=PackedStringArray("space_node", "hit_tester")]
+script = ExtResource("26_soft_touch")
+space_node = NodePath("GDCubismUserModel")
+hit_tester = NodePath("GDCubismUserModel/SoftMeshDeformer")
+hover_touch = true
+pressure_ramp_time = 0.22
+radius_min = 72.0
+radius_max = 150.0
+position_smoothing = 0.42
+velocity_smoothing = 0.35
+
+[node name="HandRig" type="Node" parent="." node_paths=PackedStringArray("touch")]
+script = ExtResource("28_soft_hand")
+touch = NodePath("../SoftTouch")
+enabled = true
+auto_update = true
+palm_radius = 92.0
+palm_forward_offset = 0.0
+palm_weight = 1.0
+finger_count = 3
+finger_radius = 25.0
+finger_spacing = 40.0
+finger_distance = 92.0
+finger_fan_back = 10.0
+finger_weight = 0.78
+thumb_enabled = false
+thumb_radius = 30.0
+thumb_along = -26.0
+thumb_side = 62.0
+thumb_weight = 0.8
+thumb_direction_deg = 135.0
+direction_smoothing = 0.18
+direction_deadzone = 14.0
+fallback_direction = Vector2(1, 0)
+
+[node name="GDCubismUserModel" type="GDCubismUserModel" parent="."]
+assets = "res://models/MO/MO.model3.json"
+parameter_mode = 1
+speed_scale = 2.0
+anim_loop = true
+anim_loop_fade_in = true
+anim_expression = ""
+anim_motion = "Idle_0"
+Live2Dby0x4682B4 = 0.0
+ParamExpEyeHighlights = 1.0
+ParamExpEyeStar = 0.0
+ParamExp1 = 0.0
+ParamExp2 = 0.0
+ParamExp3 = 0.0
+ParamExp4 = 0.0
+ParamExp5 = 0.0
+ParamExp6 = 0.0
+ParamExp7 = 0.0
+AnimLine = 1.0
+AnimLoading1 = 0.0
+AnimLoading2 = 1.0
+ParamAngleX = -6.17653
+ParamAngleY = 5.12218
+ParamAngleZ = -2.28029
+ParamBodyAngleY = 0.0
+ParamBodyAngleZ = 0.0
+ParamStep = 0.0
+ParamBreath = 0.901221
+ParamBounceInput1 = 0.0
+ParamBounceInput2 = 0.0
+ParamBounceInput3 = 0.0
+ParamBounceInput4 = 0.0
+ParamEyeLOpen = 1.0
+ParamEyeROpen = 1.0
+ParamEyeSmile = 0.0
+ParamEyeAngle = 0.0
+ParamBrowLY = 0.0
+ParamBrowRY = 0.0
+ParamMouthForm = 0.0
+ParamMouthOpenY = 0.0
+ParamTongueOut = 0.0
+ParamMouthX = 0.0
+ParamMouthY = 0.0
+PhyAngleX = -0.00803768
+PhyAngleY = 0.0347714
+PhyHairX1 = -0.0172735
+PhyHairX2 = -0.00514733
+PhyHairY1 = 0.0644799
+PhyHairY2 = -0.000617385
+PhyIrisR1 = 0.0
+PhyIrisL1 = 0.0
+PhyIrisR2 = 0.0
+PhyIrisL2 = 0.0
+PhyBounce = 0.0
+Part = 1.0
+Head_group = 1.0
+Body_group = 1.0
+Eye_group = 1.0
+Hair_front_group = 1.0
+Mouth_group = 1.0
+Face_group = 1.0
+Bow_group = 1.0
+Hair_back_group = 1.0
+Ribbon_group = 1.0
+script = ExtResource("2_o6xl0")
+
+[node name="SoftMeshDeformer" type="GDCubismEffectCustom" parent="GDCubismUserModel" node_paths=PackedStringArray("touch", "hand_rig")]
+script = ExtResource("27_soft_deformer")
+touch = NodePath("../../SoftTouch")
+hand_rig = NodePath("../../HandRig")
+use_hand_rig = true
+enabled = true
+radius = 190.0
+depth = 42.0
+flat_top = 0.34
+power = 1.8
+cross_limit = 0.8
+volume_compensation = 0.13
+drag_amount = 0.22
+spring_strength = 34.0
+spring_damping = 0.78
+recovery_strength = 22.0
+recovery_damping = 0.82
+max_displacement = 85.0
+only_visible = true
+deform_neighbor_meshes = true
+mesh_search_margin = 1.25
+
+[node name="ShadowField" type="Node2D" parent="GDCubismUserModel" node_paths=PackedStringArray("hand_rig", "touch")]
+script = ExtResource("29_shadow_field")
+hand_rig = NodePath("../../HandRig")
+touch = NodePath("../../SoftTouch")
+palm_texture = ExtResource("30_sh_palm")
+finger_textures = Array[Texture2D]([ExtResource("31_sh_f1"), ExtResource("32_sh_f2"), ExtResource("33_sh_f3"), ExtResource("34_sh_f4"), ExtResource("35_sh_f5")])
+brush_z_index = 100
+fallback_radius = 190.0
+
+[node name="Animation" type="Node" parent="GDCubismUserModel" node_paths=PackedStringArray("anim_tree")]
+script = ExtResource("3_dp3eg")
+anim_tree = NodePath("AnimationTree")
+
+[node name="EffectRandMove" type="Node" parent="GDCubismUserModel/Animation" node_paths=PackedStringArray("window", "model", "controller")]
+script = ExtResource("4_jscy8")
+window = NodePath("../../..")
+model = NodePath("../..")
+controller = NodePath("..")
+
+[node name="EffectMouseFollow" type="Node" parent="GDCubismUserModel/Animation" node_paths=PackedStringArray("model", "controller")]
+script = ExtResource("4_yc10j")
+model = NodePath("../..")
+controller = NodePath("..")
+smooth_factor = 0.2
+
+[node name="EffectEyeBlink" type="Node" parent="GDCubismUserModel/Animation" node_paths=PackedStringArray("controller")]
+script = ExtResource("4_0ld40")
+controller = NodePath("..")
+blink_interval = 3.0
+
+[node name="EffectTouch" type="Node" parent="GDCubismUserModel/Animation" node_paths=PackedStringArray("controller", "model", "particle")]
+script = ExtResource("5_gqmmt")
+controller = NodePath("..")
+model = NodePath("../..")
+particle = NodePath("../../../Particles/HeartParticles2D")
+
+[node name="AnimationPlayer" type="AnimationPlayer" parent="GDCubismUserModel/Animation"]
+root_node = NodePath("../..")
+libraries = {
+&"": SubResource("AnimationLibrary_og1vs"),
+&"expression": ExtResource("7_yc10j"),
+&"motion": SubResource("AnimationLibrary_2wyq8")
+}
+
+[node name="AnimationTree" type="AnimationTree" parent="GDCubismUserModel/Animation"]
+root_node = NodePath("../..")
+tree_root = ExtResource("17_y6deb")
+anim_player = NodePath("../AnimationPlayer")
+parameters/Expression/DynamicAdd/add_amount = 1.0
+parameters/Expression/ExpressionAdd/add_amount = 1.0
+parameters/Expression/EyeBlinkOneShot/active = false
+parameters/Expression/EyeBlinkOneShot/internal_active = false
+parameters/Expression/EyeBlinkOneShot/request = 0
+parameters/Expression/Transition/current_state = "Idle"
+parameters/Expression/Transition/transition_request = ""
+parameters/Expression/Transition/current_index = 0
+parameters/ExpressionAdd/add_amount = 1.0
+parameters/HeadAdd/add_amount = 0.8
+parameters/HeadControl/blend_position = Vector2(0, 0)
+parameters/MotonTransition/current_state = "Idle"
+parameters/MotonTransition/transition_request = ""
+parameters/MotonTransition/current_index = 0
+
+[node name="HitAreaHandler" type="GDCubismEffectHitArea" parent="GDCubismUserModel" node_paths=PackedStringArray("model", "root")]
+script = ExtResource("21_pm3ni")
+model = NodePath("..")
+root = NodePath("../..")
+
+[node name="Particles" type="Node2D" parent="."]
+
+[node name="HeartParticles2D" type="GPUParticles2D" parent="Particles"]
+z_index = 80
+emitting = false
+amount = 4
+texture = ExtResource("21_og1vs")
+lifetime = 2.0
+use_fixed_seed = true
+seed = 2760725378
+fixed_fps = 10
+fract_delta = false
+collision_base_size = 0.0
+visibility_rect = Rect2(-200, -200, 400, 400)
+trail_lifetime = 0.74
+process_material = SubResource("ParticleProcessMaterial_85g3d")
+metadata/_edit_lock_ = true
+
+[node name="UpgradeParticles2D" type="GPUParticles2D" parent="Particles"]
+z_index = 80
+emitting = false
+amount = 6
+texture = ExtResource("3_tipki")
+lifetime = 2.0
+use_fixed_seed = true
+seed = 2760725378
+fixed_fps = 10
+fract_delta = false
+collision_base_size = 0.0
+visibility_rect = Rect2(-200, -200, 400, 400)
+trail_lifetime = 0.74
+process_material = SubResource("ParticleProcessMaterial_ya4ey")
+metadata/_edit_lock_ = true
+
+[node name="GUI" type="Control" parent="."]
+visible = false
+layout_mode = 3
+anchors_preset = 0
+script = ExtResource("24_2wyq8")
+
+[node name="Toolbar" parent="GUI" instance=ExtResource("25_og1vs")]
+layout_mode = 1
+anchors_preset = 0
+anchor_left = 0.0
+anchor_right = 0.0
+offset_left = -635.0
+offset_top = 741.0
+offset_right = 670.0
+offset_bottom = 971.0
+grow_horizontal = 1
+region_rect = Rect2(0, 0, 100, 100)
+patch_margin_left = 30
+patch_margin_top = 30
+patch_margin_right = 30
+patch_margin_bottom = 30
+
+[connection signal="window_docking" from="." to="GUI" method="_on_window_docking"]
+[connection signal="window_middle_click" from="." to="GUI" method="_on_window_middle_click"]
+[connection signal="hit" from="GDCubismUserModel/HitAreaHandler" to="GDCubismUserModel/Animation/EffectTouch" method="_on_hit_area"]
+[connection signal="hit_area_entered" from="GDCubismUserModel/HitAreaHandler" to="GDCubismUserModel/HitAreaHandler" method="_on_hit_area_entered"]
+[connection signal="hit_area_exited" from="GDCubismUserModel/HitAreaHandler" to="GDCubismUserModel/HitAreaHandler" method="_on_hit_area_exited"]

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tools/soft_live2d_probe.gd" id="1_soft_probe"]
+
+[node name="SoftProbe" type="Node"]
+script = ExtResource("1_soft_probe")

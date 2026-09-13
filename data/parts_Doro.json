@@ -1,0 +1,175 @@
+{
+ "model": "Doro.moc3",
+ "counts": {
+  "parts": 10,
+  "artmeshes": 72,
+  "deformers": 31,
+  "parameters": 46
+ },
+ "parts_without_cdi3_name": [],
+ "orphan_meshes": 0,
+ "parts": [
+  {
+   "index": 0,
+   "id": "Part",
+   "name": "Doro.psd (Corresponding layer not found)",
+   "parent": -1,
+   "meshes": [
+    "Dots",
+    "Excalmation_mark",
+    "Question_mark",
+    "sunglasses",
+    "Line",
+    "Line2",
+    "Line3",
+    "Loading3",
+    "Loading4",
+    "Loading6",
+    "Loading5",
+    "Loading8",
+    "Loading7"
+   ],
+   "path": "Doro.psd (Corresponding layer not found)"
+  },
+  {
+   "index": 1,
+   "id": "Head_group",
+   "name": "Head_group",
+   "parent": -1,
+   "meshes": [
+    "Hair_side_R",
+    "Hair_Front_line_L",
+    "Hair_Front_line_R",
+    "Hair_side_L2",
+    "Hair_side_L",
+    "Dark_lines",
+    "Face_dark"
+   ],
+   "path": "Head_group"
+  },
+  {
+   "index": 2,
+   "id": "Body_group",
+   "name": "Body_group",
+   "parent": -1,
+   "meshes": [
+    "Body_outline",
+    "Leg_back_L",
+    "Leg_front_L",
+    "Leg_front_R",
+    "Body"
+   ],
+   "path": "Body_group"
+  },
+  {
+   "index": 3,
+   "id": "Eye_group",
+   "name": "Eye_group",
+   "parent": 1,
+   "meshes": [
+    "Eye_outline_L",
+    "Eye_outline_R",
+    "Eye_color_L",
+    "Eye_color_R",
+    "EyemaskR2",
+    "Eyelid_lower2",
+    "EyemaskL2",
+    "Eyelid_lower3",
+    "EyemaskR1",
+    "EyemaskL1",
+    "Eyelash_L",
+    "Eyelash_R",
+    "Eye_hl_L",
+    "Eye_hl_R",
+    "Eye_starr_R",
+    "Eye_starr_L"
+   ],
+   "path": "Head_group/Eye_group"
+  },
+  {
+   "index": 4,
+   "id": "Hair_front_group",
+   "name": "Hair_front_group",
+   "parent": 1,
+   "meshes": [
+    "Hair_front_outline_L",
+    "Hair_front_outline_R",
+    "Hair_front_outline_M1",
+    "Hair_top",
+    "Hair_front_L",
+    "Hair_front_R",
+    "Hair_front_M2",
+    "Hair_front_M1",
+    "Hair_front_outline_M2"
+   ],
+   "path": "Head_group/Hair_front_group"
+  },
+  {
+   "index": 5,
+   "id": "Mouth_group",
+   "name": "Mouth_group",
+   "parent": 1,
+   "meshes": [
+    "Mouth_inner",
+    "Tongue",
+    "Lip_Upper_mask",
+    "Lip_Upper",
+    "PaperBag"
+   ],
+   "path": "Head_group/Mouth_group"
+  },
+  {
+   "index": 6,
+   "id": "Face_group",
+   "name": "Face_group",
+   "parent": 1,
+   "meshes": [
+    "Face_outline",
+    "Face",
+    "Blush_R"
+   ],
+   "path": "Head_group/Face_group"
+  },
+  {
+   "index": 7,
+   "id": "Bow_group",
+   "name": "Bow_group",
+   "parent": 1,
+   "meshes": [
+    "Bow_R1",
+    "Bow_L1",
+    "Bow_R2",
+    "Bow_L2",
+    "Bow_M"
+   ],
+   "path": "Head_group/Bow_group"
+  },
+  {
+   "index": 8,
+   "id": "Hair_back_group",
+   "name": "Hair_back_group",
+   "parent": 1,
+   "meshes": [
+    "Hair_back_outline",
+    "Hair_base_outline",
+    "Hair_back",
+    "Hair_base_outline_light",
+    "Hair_base",
+    "Hair_pattern"
+   ],
+   "path": "Head_group/Hair_back_group"
+  },
+  {
+   "index": 9,
+   "id": "Ribbon_group",
+   "name": "Ribbon_group",
+   "parent": 1,
+   "meshes": [
+    "Ribbon3",
+    "Ribbon2",
+    "Ribbon1"
+   ],
+   "path": "Head_group/Ribbon_group"
+  }
+ ]
+}

@@ -1,0 +1,668 @@
+{
+  "version": "0.3",
+  "default_speaker": "多罗",
+  "score_can_go_negative": true,
+  "phases": [
+    {
+      "id": "p1",
+      "name": "Cold（冷漠）",
+      "unlock_score": 0,
+      "unlock_dialogue": [
+        {
+          "text": "喵？你是新来的吗？……别、别随便碰我哦。",
+          "expr": "Doubt",
+          "voice": ""
+        }
+      ],
+      "zones": {
+        "头": {
+          "label": "头部（摸头）",
+          "score": 10,
+          "random": false,
+          "lines": [
+            {
+              "text": "唔……被摸头的话，会舒服得眯起眼睛。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "头、头可不是谁都能碰的……不过你除外啦。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "再、再多摸一会儿也可以哦，我不介意的。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            1
+          ]
+        },
+        "胸": {
+          "label": "胸部（敏感/越界）",
+          "score": -8,
+          "random": false,
+          "lines": [
+            {
+              "text": "呀！那、那里不行！胸部是很害羞的地方！",
+              "expr": "DockPopAngry",
+              "voice": ""
+            },
+            {
+              "text": "呜……你故意的吧？再这样我要闹脾气了哦。",
+              "expr": "Sullen",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            1
+          ],
+          "reject": true
+        },
+        "手": {
+          "label": "手（牵手）",
+          "score": 6,
+          "random": false,
+          "lines": [
+            {
+              "text": "牵手的话……倒、倒是可以啦。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "手心有点痒呢，不过不讨厌。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            1
+          ]
+        },
+        "腿": {
+          "label": "腿（敏感）",
+          "score": -4,
+          "random": false,
+          "lines": [
+            {
+              "text": "腿、腿别碰啦！那里很害羞的！",
+              "expr": "DockPopAngry",
+              "voice": ""
+            },
+            {
+              "text": "再摸我就踢你哦！……开玩笑的啦。",
+              "expr": "Sullen",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            1
+          ]
+        },
+        "衣服": {
+          "label": "衣服",
+          "score": -2,
+          "random": false,
+          "lines": [
+            {
+              "text": "衣服很贵的，别乱拉！",
+              "expr": "Sullen",
+              "voice": ""
+            },
+            {
+              "text": "这件可是很珍视的，轻一点。",
+              "expr": "Dull",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "id": "p2",
+      "name": "Building（积累）",
+      "unlock_score": 80,
+      "unlock_dialogue": [
+        {
+          "text": "好像……跟你稍微熟一点了呢。可以再摸摸头。",
+          "expr": "SmileEyeClosed",
+          "voice": ""
+        }
+      ],
+      "zones": {
+        "头": {
+          "label": "头部（摸头）",
+          "score": 14,
+          "random": false,
+          "lines": [
+            {
+              "text": "嗯，被你摸头还是挺舒服的……别停。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "已经可以信任你了吗？……哼，勉强算你过关。",
+              "expr": "Doubt",
+              "voice": ""
+            },
+            {
+              "text": "你的手好暖。再多待一会儿也可以哦。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        },
+        "胸": {
+          "label": "胸部（敏感/越界）",
+          "score": -4,
+          "random": false,
+          "lines": [
+            {
+              "text": "胸、胸部还是不行啦……轻一点好不好。",
+              "expr": "Sullen",
+              "voice": ""
+            },
+            {
+              "text": "虽、虽然熟了点，但那里还是不允许随便碰哦。",
+              "expr": "DockPopAngry",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            1
+          ],
+          "reject": true
+        },
+        "手": {
+          "label": "手（牵手）",
+          "score": 10,
+          "random": false,
+          "lines": [
+            {
+              "text": "主动牵我的手了？……那就，陪你走一会儿。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "你的手好温暖，不想放开。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        },
+        "腿": {
+          "label": "腿（敏感）",
+          "score": -2,
+          "random": false,
+          "lines": [
+            {
+              "text": "腿还是有点害羞啦……不过你碰的话我忍一下。",
+              "expr": "Sullen",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        },
+        "衣服": {
+          "label": "衣服",
+          "score": 0,
+          "random": false,
+          "lines": [
+            {
+              "text": "衣服嘛……你整理的样子还挺温柔的。",
+              "expr": "Dull",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "id": "p3",
+      "name": "Intimate（亲近）",
+      "unlock_score": 200,
+      "unlock_dialogue": [
+        {
+          "text": "现在……我已经不讨厌你碰我了。甚至，有点喜欢。",
+          "expr": "SmileEyeClosed",
+          "voice": ""
+        }
+      ],
+      "zones": {
+        "头": {
+          "label": "头部（摸头）",
+          "score": 18,
+          "random": false,
+          "lines": [
+            {
+              "text": "头靠过来让你摸……这种事，只对你在做哦。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "喜欢被你摸头。以后……每天都要来好不好？",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "（眯起眼睛）……谢谢你还愿意陪着我。",
+              "expr": "Silence",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        },
+        "胸": {
+          "label": "胸部（敏感/越界）",
+          "score": -1,
+          "random": false,
+          "lines": [
+            {
+              "text": "胸部……如果是你，轻轻的、我可以忍一下啦。",
+              "expr": "Sullen",
+              "voice": ""
+            },
+            {
+              "text": "别太过分哦。虽然是特别的你，也有底线。",
+              "expr": "DockPopAngry",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        },
+        "手": {
+          "label": "手（牵手）",
+          "score": 14,
+          "random": false,
+          "lines": [
+            {
+              "text": "十指相扣了哦……这样，算是约定了吧？",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "牵着手就安心。别松开好不好。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        },
+        "腿": {
+          "label": "腿（敏感）",
+          "score": 2,
+          "random": false,
+          "lines": [
+            {
+              "text": "腿的话……现在可以让你轻轻碰了啦。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        },
+        "衣服": {
+          "label": "衣服",
+          "score": 2,
+          "random": false,
+          "lines": [
+            {
+              "text": "你帮我理衣服的样子，让我有点心动。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "id": "p4",
+      "name": "Active（投入）",
+      "unlock_score": 400,
+      "unlock_dialogue": [
+        {
+          "text": "无论你是谁、要去哪……我都会跟着你。这是约定。",
+          "expr": "SmileEyeClosed",
+          "voice": ""
+        }
+      ],
+      "zones": {
+        "头": {
+          "label": "头部（摸头）",
+          "score": 22,
+          "random": false,
+          "lines": [
+            {
+              "text": "我的头、我的心，都交给你了。请一直陪着我。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "（蹭了蹭你的手）……最喜欢你了。真的。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "以后不管解锁什么，第一个想给你看的人都是你。",
+              "expr": "Amaze",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            2,
+            3
+          ]
+        },
+        "胸": {
+          "label": "胸部（敏感/越界）",
+          "score": 0,
+          "random": false,
+          "lines": [
+            {
+              "text": "现在连那里……也只准你碰。但还是要温柔哦。",
+              "expr": "Sullen",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            2,
+            3
+          ]
+        },
+        "手": {
+          "label": "手（牵手）",
+          "score": 18,
+          "random": false,
+          "lines": [
+            {
+              "text": "牵着我的手，就再也不准放开了哦。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "我们用牵着的手，去任何地方都行。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            2,
+            3
+          ]
+        },
+        "腿": {
+          "label": "腿（敏感）",
+          "score": 6,
+          "random": false,
+          "lines": [
+            {
+              "text": "腿也交给你了……全部，都是你的。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            2,
+            3
+          ]
+        },
+        "衣服": {
+          "label": "衣服",
+          "score": 4,
+          "random": false,
+          "lines": [
+            {
+              "text": "你帮我整理衣服的动作，我都记在心里了。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ],
+          "anim_level": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "id": "p5",
+      "name": "Peak（顶点）",
+      "unlock_score": 600,
+      "unlock_dialogue": [
+        {
+          "text": "（呼吸急促）……你、你真的要把我逼到这种地步吗……我好喜欢。",
+          "expr": "SmileEyeClosed",
+          "voice": ""
+        }
+      ],
+      "zones": {
+        "头": {
+          "label": "头部",
+          "score": 26,
+          "random": false,
+          "anim_level": [
+            4,
+            4
+          ],
+          "lines": [
+            {
+              "text": "（把头埋进你怀里）……别看我，我现在的样子太丢人了。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "（轻轻蹭着）……最喜欢了，最喜欢你了。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ]
+        },
+        "胸": {
+          "label": "胸部（敏感/越界）",
+          "score": 16,
+          "random": false,
+          "anim_level": [
+            4,
+            4
+          ],
+          "lines": [
+            {
+              "text": "（按住你的手贴在胸前）……感受到了吗，它跳得好快。",
+              "expr": "Dull",
+              "voice": ""
+            }
+          ]
+        },
+        "手": {
+          "label": "手（牵手）",
+          "score": 24,
+          "random": false,
+          "anim_level": [
+            4,
+            4
+          ],
+          "lines": [
+            {
+              "text": "（十指紧紧相扣）……这下，你逃不掉了哦。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ]
+        },
+        "腿": {
+          "label": "腿（敏感）",
+          "score": 16,
+          "random": false,
+          "anim_level": [
+            4,
+            4
+          ],
+          "lines": [
+            {
+              "text": "（腿软了一下）……都怪你，站不太稳了。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ]
+        },
+        "衣服": {
+          "label": "衣服",
+          "score": 14,
+          "random": false,
+          "anim_level": [
+            4,
+            4
+          ],
+          "lines": [
+            {
+              "text": "（任由你解开）……温柔一点，好不好。",
+              "expr": "Silence",
+              "voice": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "p6",
+      "name": "After（余韵）",
+      "unlock_score": 800,
+      "unlock_dialogue": [
+        {
+          "text": "（靠在你肩上）……好幸福。就这样，待一会儿就好。",
+          "expr": "SmileEyeClosed",
+          "voice": ""
+        }
+      ],
+      "zones": {
+        "头": {
+          "label": "头部",
+          "score": 8,
+          "random": false,
+          "anim_level": [
+            1,
+            2
+          ],
+          "lines": [
+            {
+              "text": "（眯着眼）……刚才那样，可以再来一次吗？轻轻的。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            },
+            {
+              "text": "（蹭了蹭）……头给你摸，随便摸。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ]
+        },
+        "胸": {
+          "label": "胸部（敏感/越界）",
+          "score": 8,
+          "random": false,
+          "anim_level": [
+            1,
+            2
+          ],
+          "lines": [
+            {
+              "text": "（牵着你的手按在胸口）……这里，以后只认你一个人的温度。",
+              "expr": "Silence",
+              "voice": ""
+            }
+          ]
+        },
+        "手": {
+          "label": "手（牵手）",
+          "score": 8,
+          "random": false,
+          "anim_level": [
+            1,
+            2
+          ],
+          "lines": [
+            {
+              "text": "（不舍得放开）……手，再多牵一会儿。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ]
+        },
+        "腿": {
+          "label": "腿（敏感）",
+          "score": 6,
+          "random": false,
+          "anim_level": [
+            1,
+            2
+          ],
+          "lines": [
+            {
+              "text": "（把腿靠过来）……累了，借我靠一下下。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ]
+        },
+        "衣服": {
+          "label": "衣服",
+          "score": 6,
+          "random": false,
+          "anim_level": [
+            1,
+            2
+          ],
+          "lines": [
+            {
+              "text": "（理了理被弄乱的衣服，笑了）……你整理的样子，我上瘾了。",
+              "expr": "SmileEyeClosed",
+              "voice": ""
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
