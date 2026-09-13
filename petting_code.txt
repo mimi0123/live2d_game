@@ -1,0 +1,2467 @@
+Live2D 互动游戏 —— 人物抚摸系统（SoftTouch）代码
+工程: J:\live2d_game    生成: 2026-09-13 17:29
+架构: TouchManager(触点) -> HandRig(虚拟手=掌心+3指) -> ContactBlend(多触点合并)
+      -> PressureField(压力场) -> SoftMeshDeformer(gd_cubism ArtMesh 顶点形变)
+      -> ShadowField/ShadowBrush(独立阴影层，只读接触、不写顶点)
+挂载: main.tscn 的 GDCubismUserModel 下（节点块附在文末）
+
+======================================================================
+// 文件: scripts/gd/soft/contact_blend.gd   (197 行)
+======================================================================
+## ContactBlend —— 多个接触点如何合并成一个顶点位移（SoftTouch 模块 · STEP 3）
+##
+## 这是 STEP 3 唯一新增的「数学」，纯静态、不依赖 Live2D / Node / 场景。
+## 之所以把它单独拿出来而不是塞进 mesh_deformer.gd：
+##   1) 合并规则是「危险区」（很容易写出多触点叠加爆炸），必须能被独立测试钉死；
+##   2) 测试 tools/hand_contact_test.gd 可以在 headless 下直接调它，
+##      不需要真的跑 Live2D 就能验证「4 个触点不会叠成 70px」。
+##
+## ─────────────────────────────────────────────────────────────
+## 合并顺序（严格按 STEP 3 指定的流程，不是每个触点先截断再相加）
+## ─────────────────────────────────────────────────────────────
+##   raw_sum    ：把每个接触的「凹陷 + 体积补偿」矢量相加
+##   drag       ：各接触的拖动量单独累加，最后按最深接触统一限幅
+##   cross_limit：**合并之后**才做 —— 逐接触检查「朝内分量」是否超过 dist×cross_limit，
+##                超过就沿该接触法线补回去；多轮迭代 + 兜底缩放，
+##                保证「顶点永不穿过任何触点」是硬保证而不是运气
+##   max_disp   ：最后再做一次全局模长上限
+##
+## 为什么不能「每个接触先各自截断再相加」：
+##   每个接触都截断到 dist*0.8，四个触点相加最坏是 3.2×dist，局部直接塌成一点。
+##
+## 为什么不能只做「合并后截断到 dist×cross」：
+##   多触点法线方向不同，只截一个方向另一个方向仍然可能穿点。
+##   所以按接触逐个投影检查（少量迭代即可收敛，因为投影是压缩映射）。
+
+class_name ContactBlend
+extends RefCounted
+
+## 与 STEP 2 一致的深度上升下限：depth * lerp(RAMP_FLOOR, 1.0, pressure)
+const RAMP_FLOOR := 0.55
+## 速度 → 拖动位移的换算系数（与 STEP 2 单触点版本保持一致）
+const DRAG_SCALE := 0.045
+## 拖动位移上限 = 本顶点最深接触 depth 的多少倍
+const DRAG_LIMIT_RATIO := 0.45
+## cross_limit 迭代轮数（投影压缩，2~3 轮足够；多留一轮做保险）
+const CLAMP_PASSES := 4
+## 最多参与合并的接触数（防御性上限，防止以后参数写错炸性能）
+const MAX_CONTACTS := 8
+
+
+## 合并主入口。
+##
+## base       顶点的**原始静止位置**（不是当前写回位置 —— 必须用 _base）
+## contacts   Array[HandContact]（允许含未激活的，内部会跳过）
+## depth      触点中心的最大凹陷深度（像素，来自 SoftMeshDeformer.depth）
+## flat_top   平顶比例（来自 SoftMeshDeformer.flat_top）
+## power      肩部衰减指数（来自 SoftMeshDeformer.power）
+## volume_compensation 外围体积补偿强度
+## drag_amount 速度→拖动量的手调系数（来自 SoftMeshDeformer.drag_amount）
+## cross_limit 几何上限（朝内位移 ≤ dist × cross_limit）
+## max_displacement 全局位移模长上限（传 0 = 不在这一步夹，交给弹簧之后的全局夹）
+##
+## 返回：这个顶点最终应该产生的位移（模型空间）。
+##   · 没有任何接触影响 → 严格返回 Vector2.ZERO
+##   · 任何一步出 NaN  → 严格返回 Vector2.ZERO（宁可不形变，也不许污染网格）
+static func merge(base: Vector2, contacts: Array, depth: float, flat_top: float, power: float,
+		volume_compensation: float, drag_amount: float, cross_limit: float,
+		max_displacement: float) -> Vector2:
+	if contacts == null or contacts.is_empty():
+		return Vector2.ZERO
+
+	# ── 预算一遍几何：位置 / 法线 / 距离 / 半径 / 深度 / profile / 速度 ──
+	var n: int = mini(contacts.size(), MAX_CONTACTS)
+	var nrm := PackedVector2Array()        # 顶点指向外的单位法线
+	var dst := PackedFloat32Array()        # 顶点到接触中心的距离
+	var rad := PackedFloat32Array()        # 该接触半径
+	var dep := PackedFloat32Array()        # 该接触的实际 depth（含权重与压力曲线）
+	var prf := PackedFloat32Array()        # 该接触在该顶点的 profile 值
+	var vel := PackedVector2Array()        # 该接触的速度
+	for j in n:
+		var c = contacts[j]
+		if c == null or not c.is_on():
+			continue
+		var off: Vector2 = base - c.position
+		var dist: float = off.length()
+		if not is_finite(dist):
+			continue
+		if dist >= c.radius or dist <= 0.001:
+			continue
+		var prof: float = PressureField.soft_press_profile(dist, c.radius, flat_top, power)
+		if prof <= 0.0001:
+			continue
+		nrm.append(off / dist)
+		dst.append(dist)
+		rad.append(c.radius)
+		dep.append(depth * _depth_factor(c))
+		prf.append(prof)
+		vel.append(c.velocity)
+
+	if dst.is_empty():
+		return Vector2.ZERO
+
+	# ── ① 求和：凹陷 + 体积补偿 + 速度拖动 ──
+	var raw := Vector2.ZERO
+	var drag := Vector2.ZERO
+	var deepest := 0.0
+	var count: int = dst.size()
+	for k in count:
+		var d: float = dep[k]
+		deepest = maxf(deepest, d)
+		# 中心凹陷
+		raw -= nrm[k] * d * prf[k]
+		# 外围轻微外鼓（软组织体积被挤向周围）
+		if volume_compensation > 0.0:
+			var ring_t: float = (dst[k] - rad[k] * 0.48) / (rad[k] * 0.42)
+			var ring: float = exp(-ring_t * ring_t * 2.2)
+			raw += nrm[k] * d * volume_compensation * ring * prf[k]
+		# 拖动携带（速度矢量，多接触各自累加，最后统一限幅）
+		if drag_amount > 0.0 and vel[k].length_squared() > 0.01:
+			drag += vel[k] * drag_amount * DRAG_SCALE * prf[k]
+
+	# ── ② 拖动限幅后并入 ──
+	var drag_limit: float = deepest * DRAG_LIMIT_RATIO
+	if drag_limit <= 0.0:
+		drag = Vector2.ZERO
+	elif drag.length() > drag_limit:
+		drag = drag.normalized() * drag_limit
+	raw += drag
+
+	# ── ③ cross_limit：合并之后统一夹（硬保证「不穿过任何触点」）──
+	if cross_limit > 0.0:
+		for _pass in CLAMP_PASSES:
+			var worst: float = 0.0
+			for k in count:
+				var inward: float = -raw.dot(nrm[k])
+				var cap: float = dst[k] * cross_limit
+				if inward > cap:
+					var over: float = inward - cap
+					raw += nrm[k] * over
+					worst = maxf(worst, over)
+			if worst <= 0.0001:
+				break
+		# 兜底：多触点互拽时极少数情况仍可能越界，整体等比缩回去
+		var ratio: float = 0.0
+		for k in count:
+			var cap2: float = dst[k] * cross_limit
+			if cap2 > 0.0001:
+				ratio = maxf(ratio, -raw.dot(nrm[k]) / cap2)
+		if ratio > 1.0:
+			raw /= ratio
+
+	# ── ④ 全局模长上限 ──
+	if max_displacement > 0.0 and raw.length() > max_displacement:
+		raw = raw.normalized() * max_displacement
+
+	# ── ⑤ NaN 闸门 ──
+	if not (is_finite(raw.x) and is_finite(raw.y)):
+		return Vector2.ZERO
+	return raw
+
+
+## 诊断用：该顶点被哪些接触影响、各自贡献多少、上限多少。
+## 只读、不参与顶点计算，供探针 / 测试打印。
+static func explain(base: Vector2, contacts: Array, depth: float, flat_top: float, power: float,
+		cross_limit: float) -> Array:
+	var out: Array = []
+	if contacts == null:
+		return out
+	for j in mini(contacts.size(), MAX_CONTACTS):
+		var c = contacts[j]
+		if c == null:
+			continue
+		var off: Vector2 = base - c.position
+		var dist: float = off.length()
+		var prof: float = 0.0
+		if dist > 0.001 and dist < c.radius:
+			prof = PressureField.soft_press_profile(dist, c.radius, flat_top, power)
+		var d: float = depth * _depth_factor(c)
+		out.append({
+			"type": HandContact.TYPE_NAMES.get(c.type, "?"),
+			"on": c.is_on(),
+			"dist": dist,
+			"radius": c.radius,
+			"profile": prof,
+			"depth": d,
+			"inward_raw": d * prof,
+			"cap": dist * cross_limit,
+		})
+	return out
+
+
+## 单个接触在某个顶点上的「原始凹陷量」（未合并、未夹紧）。
+## 测试 F 用它得到「单 Palm = 多少 / 单 Finger = 多少」的对照值。
+static func single_inward(base: Vector2, c, depth: float, flat_top: float, power: float) -> float:
+	if c == null or not c.is_on():
+		return 0.0
+	var dist: float = base.distance_to(c.position)
+	if dist <= 0.001 or dist >= c.radius:
+		return 0.0
+	return depth * _depth_factor(c) * PressureField.soft_press_profile(dist, c.radius, flat_top, power)
+
+
+## 与 HandContact.depth_factor() 同一条公式（此处复制一份：merge 是热路径，
+## 每个顶点都会走，避免再绕一层方法调用；两处必须保持一致）
+static func _depth_factor(c) -> float:
+	return clampf(c.weight, 0.0, 10.0) * lerpf(RAMP_FLOOR, 1.0, clampf(c.pressure, 0.0, 1.0))
+
+======================================================================
+// 文件: scripts/gd/soft/hand_contact.gd   (120 行)
+======================================================================
+## HandContact —— 一个「接触点」的纯数据描述（SoftTouch 模块 · STEP 3）
+##
+## 分层铁律（STEP 3 明确要求）：
+##   HandContact      只描述「手」：位置 / 半径 / 压力 / 速度 / 方向 / 开关 / 类型
+##   HandRig          只负责摆放出 Palm + Finger（模型空间）
+##   ContactBlend     只负责把多个接触合并成一个位移（纯数学）
+##   SoftMeshDeformer 才负责 Live2D 顶点：读 contacts → 算场 → 写回 ArtMesh
+##
+## 所以本文件【不】引用 Live2D、Node、MeshInstance2D、ArrayMesh 中的任何东西。
+## 它连 RefCounted 都只是为了让测试里能 new 出来，除此之外没有任何行为。
+##
+## 坐标单位：一律是模型空间（画布像素）。绝不是屏幕像素 ——
+## 这样 Camera2D 怎么缩放，手指的粗细都不会跟着变（STEP 3 测试项 G）。
+
+class_name HandContact
+extends RefCounted
+
+## 接触类型。STEP 3 只产出 PALM / FINGER（Thumb 预留，默认不启用）。
+enum Type {
+	DEFAULT,   ## 旧单触点路径（TouchManager 直接给的那一个点）
+	PALM,      ## 手掌——最大的那块
+	FINGER,    ## 手指
+	THUMB,     ## 拇指（结构已就位，STEP 3 默认关闭）
+}
+
+## 类型名（打印 / 报告用）
+const TYPE_NAMES := {
+	Type.DEFAULT: "DEFAULT",
+	Type.PALM: "PALM",
+	Type.FINGER: "FINGER",
+	Type.THUMB: "THUMB",
+}
+
+## 接触类型
+var type: int = Type.DEFAULT
+## 接触中心（模型空间）
+var position: Vector2 = Vector2.ZERO
+## 影响半径（模型空间）。与压力无关的固定几何量，不允许由屏幕像素换算。
+var radius: float = 90.0
+## 压力 0~1（来自 TouchManager 的压力上升曲线，未乘权重）
+var pressure: float = 0.0
+## 出力权重：等效于「该接触的 depth 倍率」。
+##   PALM 1.0 / FINGER 0.78 / THUMB 0.8（STEP 3 起始值，可由 HandRig 导出变量调）
+## 之所以作用在 depth 上而不是直接乘 pressure，是为了不和压力上升曲线
+## lerp(0.55, 1.0, p) 耦合 —— 否则「手指比掌心浅 22%」会被曲线吃掉一部分。
+var weight: float = 1.0
+## 该接触自身的移动速度（模型空间 / 秒）。多指可以各自不同。
+var velocity: Vector2 = Vector2.ZERO
+## 单位方向向量（手的朝向；STEP 3 只做记录与测试，STEP 4 阴影画笔会用到）
+var direction: Vector2 = Vector2.RIGHT
+## 是否处于接触状态
+var active: bool = false
+
+
+## 是否在参与计算（active + 有压力 + 有半径）
+func is_on() -> bool:
+	return active and pressure > 0.0001 and radius > 0.0 and weight > 0.0
+
+
+## 该接触对 depth 的实际倍率（压力上升曲线 × 权重）
+func depth_factor() -> float:
+	return weight * lerpf(0.55, 1.0, clampf(pressure, 0.0, 1.0))
+
+
+## 「等效压力」= pressure × weight。仅用于报告 / STEP 4 阴影，不参与顶点计算。
+func effective_pressure() -> float:
+	return clampf(pressure, 0.0, 1.0) * weight
+
+
+## 单位化后的方向（零向量时退回 RIGHT，永不返回 NaN）
+func safe_direction() -> Vector2:
+	if direction.length_squared() < 0.000001:
+		return Vector2.RIGHT
+	return direction.normalized()
+
+
+## 浅拷贝（测试里要拿同一份参数反复改，避免互相污染）
+func clone() -> HandContact:
+	var c := HandContact.new()
+	c.type = type
+	c.position = position
+	c.radius = radius
+	c.pressure = pressure
+	c.weight = weight
+	c.velocity = velocity
+	c.direction = direction
+	c.active = active
+	return c
+
+
+## 一行摘要（报告用）
+func describe() -> String:
+	return "%-7s pos=(%8.1f,%8.1f) r=%6.1f p=%.2f w=%.2f dir=(%.2f,%.2f) v=%.1f %s" % [
+		TYPE_NAMES.get(type, "?"), position.x, position.y, radius, pressure, weight,
+		direction.x, direction.y, velocity.length(), "ON" if active else "off"]
+
+
+## 静态构造：让 HandRig 的代码短一点，也保证字段不会被漏填
+static func make(p_type: int, p_position: Vector2, p_radius: float, p_pressure: float,
+		p_weight: float = 1.0, p_direction: Vector2 = Vector2.RIGHT,
+		p_velocity: Vector2 = Vector2.ZERO, p_active: bool = true) -> HandContact:
+	var c := HandContact.new()
+	c.type = p_type
+	c.position = p_position
+	c.radius = p_radius
+	c.pressure = p_pressure
+	c.weight = p_weight
+	c.direction = p_direction
+	c.velocity = p_velocity
+	c.active = p_active
+	return c
+
+
+## 静态构造：从 TouchManager 那种「单触点」世界来的一颗接触
+static func from_touch(p_position: Vector2, p_radius: float, p_pressure: float,
+		p_velocity: Vector2, p_active: bool) -> HandContact:
+	return make(Type.DEFAULT, p_position, p_radius, p_pressure, 1.0,
+		Vector2.RIGHT if p_velocity.length_squared() < 0.000001 else p_velocity.normalized(),
+		p_velocity, p_active)
+
+======================================================================
+// 文件: scripts/gd/soft/hand_rig.gd   (212 行)
+======================================================================
+## HandRig —— 一只「虚拟手」的摆放器（SoftTouch 模块 · STEP 3）
+##
+## 职责（只有这一件事）：
+##   把 TouchManager 的单一触点，摊开成 Palm + 3 Fingers（可选 Thumb）的接触数组。
+##   它【不】碰 Live2D，【不】碰顶点，【不】碰 MeshInstance2D。
+##
+## 第一版的手不是解剖学的手，而是「一眼能看出不是一个圆」的最小结构：
+##
+##              F1    F2    F3
+##               ○     ○     ○        <- 指尖，排在掌心前方，带一点点弧度
+##            ┌───────────────┐
+##            │     PALM      │        <- 掌心，中心 = 鼠标/模型位置
+##            └───────────────┘
+##                    \
+##                   THUMB             <- 预留，默认关闭
+##
+## 三条 STEP 3 硬约束都在这里落地：
+##   ① 全部尺寸是**模型空间**（画布像素），与屏幕像素 / Camera2D.zoom 无关；
+##   ② 手的方向跟随移动方向，但速度低于死区时**沿用上次方向**（不抖动）；
+##   ③ 参数全部 @export，方便 Master 在 Inspector 里直接调。
+
+class_name HandRig
+extends Node
+
+## 数据源：由它提供 position / pressure / velocity / active
+@export var touch: TouchManager = null
+@export var enabled: bool = true
+## 是否每帧自动从 touch 重建 contacts（测试里会关掉，手动调用）
+@export var auto_update: bool = true
+
+@export_group("手掌 Palm")
+## 掌心影响半径（模型空间）。STEP 3 起始区间 80~100。
+@export_range(20.0, 300.0, 1.0) var palm_radius: float = 92.0
+## 掌心沿手方向的额外前移量（一般 0：掌心就在鼠标处）
+@export_range(-120.0, 120.0, 1.0) var palm_forward_offset: float = 0.0
+## 掌心的出力权重（depth 倍率），1.0 = 满深
+@export_range(0.0, 1.5, 0.01) var palm_weight: float = 1.0
+
+@export_group("手指 Finger")
+## 手指数量（STEP 3 用 3；最大 8，方便以后加）
+@export_range(0, 8, 1) var finger_count: int = 3
+## 单根手指的影响半径（模型空间）。STEP 3 起始区间 25~35。
+@export_range(8.0, 120.0, 1.0) var finger_radius: float = 25.0
+## 相邻手指间距（模型空间）。STEP 3 起始区间 25~40。
+## ⚠ 必须 > finger_radius，否则相邻两根手指的压力场会互相抵消、
+##   三根手指融成一坨（实测：34/30 时只测得出 1 个局部区域；40/25 时能分出 4 个）。
+@export_range(0.0, 160.0, 1.0) var finger_spacing: float = 40.0
+## 掌心中心到指根的距离（模型空间）
+@export_range(0.0, 300.0, 1.0) var finger_distance: float = 92.0
+## 两侧手指相对中指的「回收量」，造出一点点弧线（0 = 完全平排）
+@export_range(0.0, 80.0, 1.0) var finger_fan_back: float = 10.0
+## 手指的出力权重（depth 倍率）。STEP 3 起始区间 0.70~0.85。
+@export_range(0.0, 1.5, 0.01) var finger_weight: float = 0.78
+
+@export_group("拇指 Thumb")
+## STEP 3 默认关闭 —— 只把结构留好，不做完整五指。
+@export var thumb_enabled: bool = false
+@export_range(8.0, 120.0, 1.0) var thumb_radius: float = 30.0
+## 拇指相对掌心沿手方向的偏移（负 = 靠后）
+@export_range(-200.0, 200.0, 1.0) var thumb_along: float = -26.0
+## 拇指相对掌心沿侧向的偏移（正 = 手掌侧面）
+@export_range(-200.0, 200.0, 1.0) var thumb_side: float = 62.0
+@export_range(0.0, 1.5, 0.01) var thumb_weight: float = 0.8
+## 拇指自身朝向相对手方向的夹角（度）。仅记录，STEP 4 阴影用。
+@export_range(-180.0, 180.0, 1.0) var thumb_direction_deg: float = 135.0
+
+@export_group("方向")
+## 方向平滑系数（0~1）：越大越跟手、越小越稳
+@export_range(0.01, 1.0, 0.01) var direction_smoothing: float = 0.18
+## 速度死区（模型空间/秒）：低于它就不更新方向，直接用上次方向
+@export_range(0.0, 200.0, 0.5) var direction_deadzone: float = 14.0
+## 开天辟地第一次接触时的默认朝向
+@export var fallback_direction: Vector2 = Vector2.RIGHT
+
+## 本帧的接触数组（Palm + Fingers[+ Thumb]）。SoftMeshDeformer 只读它。
+var contacts: Array[HandContact] = []
+## 当前手方向（单位向量）。静止时保持不变。
+var hand_direction: Vector2 = Vector2.RIGHT
+## 是否已经确立过方向（第一次接触前为 false）
+var has_direction: bool = false
+## 诊断：方向被速度更新过多少次（静止时不变 → 抖动测试看它）
+var direction_updates: int = 0
+
+
+func _ready() -> void:
+	set_process(auto_update)
+
+
+func _process(_delta: float) -> void:
+	if not auto_update:
+		return
+	update()
+
+
+## 每帧入口：读数 → 定方向 → 摆接触
+func update() -> void:
+	if not enabled or touch == null or not is_instance_valid(touch):
+		contacts.clear()
+		return
+	var active: bool = bool(touch.active)
+	# 沿用 TouchManager 自己的死区速度（它已经滤过一轮），这里再过一道
+	update_direction(touch.velocity)
+	contacts = build_contacts(touch.position, hand_direction, clampf(touch.pressure, 0.0, 1.0),
+		touch.velocity, active)
+
+
+## 方向状态机：带死区 + 角度平滑。
+##   · velocity 长度 < direction_deadzone  → 完全不动 hand_direction（防抖动）
+##   · 第一次有效速度                      → 直接采用，不做平滑（避免从默认方向慢慢转）
+##   · 之后                                → 按最短角差平滑转向
+func update_direction(velocity: Vector2) -> void:
+	if velocity.length() < direction_deadzone:
+		return
+	var target := velocity.normalized()
+	if not has_direction:
+		hand_direction = target
+		has_direction = true
+		direction_updates += 1
+		return
+	var a: float = hand_direction.angle()
+	var b: float = target.angle()
+	var diff: float = wrapf(b - a, -PI, PI)
+	hand_direction = Vector2.RIGHT.rotated(a + diff * clampf(direction_smoothing, 0.0, 1.0))
+	if hand_direction.length_squared() < 0.000001:
+		hand_direction = target
+	hand_direction = hand_direction.normalized()
+	direction_updates += 1
+
+
+## 当前朝向（永不返回零向量 / NaN）
+func current_direction() -> Vector2:
+	if hand_direction.length_squared() < 0.000001:
+		return fallback_direction.normalized()
+	return hand_direction.normalized()
+
+
+## 摆出接触数组。纯几何，不读任何全局状态 —— 测试可以直接调。
+##
+## center     模型空间触点（掌心中心）
+## dir        手朝向（单位向量；非单位会自动归一）
+## pressure   0~1 压力（三项接触共用，出力差异由 weight 体现）
+## velocity   手的速度（模型空间/秒）
+## active     是否接触中
+func build_contacts(center: Vector2, dir: Vector2, pressure: float, velocity: Vector2,
+		active: bool) -> Array[HandContact]:
+	var out: Array[HandContact] = []
+	var fwd: Vector2 = dir
+	if fwd.length_squared() < 0.000001:
+		fwd = fallback_direction
+	fwd = fwd.normalized()
+	var side := Vector2(-fwd.y, fwd.x)          # 手方向的左手侧（Godot Y 向下，纯几何垂直）
+	var p: float = clampf(pressure, 0.0, 1.0)
+
+	# ── 掌心 ──
+	out.append(HandContact.make(HandContact.Type.PALM,
+		center + fwd * palm_forward_offset, palm_radius, p, palm_weight, fwd, velocity, active))
+
+	# ── 手指：横排在掌心前方，外侧两根略回收，形成浅弧 ──
+	var n: int = maxi(finger_count, 0)
+	if n > 0:
+		var half: float = float(n - 1) * 0.5
+		for i in n:
+			var t: float = float(i) - half                       # -1 … +1
+			var along: float = finger_distance - absf(t) * finger_fan_back
+			var lateral: float = t * finger_spacing
+			out.append(HandContact.make(HandContact.Type.FINGER,
+				center + fwd * along + side * lateral, finger_radius, p, finger_weight,
+				fwd, velocity, active))
+
+	# ── 拇指（默认关闭）──
+	if thumb_enabled:
+		var tdir: Vector2 = fwd.rotated(deg_to_rad(thumb_direction_deg))
+		out.append(HandContact.make(HandContact.Type.THUMB,
+			center + fwd * thumb_along + side * thumb_side, thumb_radius, p, thumb_weight,
+			tdir, velocity, active))
+
+	return out
+
+
+## 所有接触的影响半径（模型空间），用于外圈剔除
+func max_radius() -> float:
+	var best := 0.0
+	for c in contacts:
+		best = maxf(best, c.radius)
+	return best
+
+
+## 所有接触的包围圆：返回 [center, radius]；无接触时 radius = 0
+func bounding_circle() -> Array:
+	if contacts.is_empty():
+		return [Vector2.ZERO, 0.0]
+	var c0: Vector2 = contacts[0].position
+	var mn: Vector2 = c0
+	var mx: Vector2 = c0
+	for c in contacts:
+		mn.x = minf(mn.x, c.position.x)
+		mn.y = minf(mn.y, c.position.y)
+		mx.x = maxf(mx.x, c.position.x)
+		mx.y = maxf(mx.y, c.position.y)
+	var center: Vector2 = (mn + mx) * 0.5
+	var r: float = 0.0
+	for c in contacts:
+		r = maxf(r, c.position.distance_to(center) + c.radius)
+	return [center, r]
+
+
+## 一行摘要（诊断 / 报告用）
+func describe_layout() -> String:
+	return "hand dir=(%.2f,%.2f) contacts=%d palm_r=%.0f finger_r=%.0f spacing=%.0f distance=%.0f thumb=%s" % [
+		hand_direction.x, hand_direction.y, contacts.size(), palm_radius, finger_radius,
+		finger_spacing, finger_distance, "on" if thumb_enabled else "off"]
+
+======================================================================
+// 文件: scripts/gd/soft/mesh_deformer.gd   (472 行)
+======================================================================
+## Live2D ArtMesh 触摸形变器（SoftTouch 模块 · STEP 3）
+##
+## 数据流：
+##   接触数组 → 逐顶点遍历 contacts（各自算影响场）→ 合并位移 → 统一 cross_limit
+##            → 逐顶点弹簧/阻尼 → 写回 ArtMesh 顶点
+##
+## ─────────────────────────────────────────────────────────────
+## STEP 3 改了什么（其它一律没动：_base / _wrote / 动画跟随 / profile / cross_limit）
+## ─────────────────────────────────────────────────────────────
+## ① 从「一个圆」升级到「一只手」：本脚本不再自己算影响场，而是把每帧的
+##    Array[HandContact] 交给 ContactBlend.merge()。合并规则（求和 → 统一夹紧）
+##    写在 contact_blend.gd，那里可以被 headless 测试直接钉死。
+##    · 单触点回退路径（hand_rig 缺席）走同一套 merge，一颗接触的算式与 STEP 2 逐项相同，
+##      所以冻结的 39.03px 手感不会漂移。
+## ② 多触点剔除：AABB 早退与状态回收从「离一个圆心远不远」改为
+##    「离任意一颗接触的圆远不远」。
+## ③ 修正一个隐性 bug：旧版无论 touch.active 与否都传 touching=true，
+##    于是松手后仍按 pressure=0 的 0.55 深度下限一直凹着（松手不回弹）。
+##    现在 touching 只在「真有接触受力」时为真，对应测试项 J（全 inactive → 归零）。
+##
+## ─────────────────────────────────────────────────────────────
+## STEP 2 修掉的两个根本问题（都有实测数据支撑，此处保留不动）
+## ─────────────────────────────────────────────────────────────
+## ① 自反馈失控（这是「凹陷只有 1/4」的真正原因，跟参数无关）
+##    实测发现：插件并不会每帧重算 ArtMesh 顶点。我们写回去的顶点，
+##    就是下一帧 surface_get_arrays() 读到的「基准」。于是同一个顶点被
+##    逐帧往触点方向拖，越过触点后方向翻转、来回弹 —— 对「原始静止位置」
+##    的真实位移冲到 162px（depth 设的是 42），网格被拉烂；
+##    而按「当前基准」量出来的位移只剩 ~11px，于是看起来「只有 1/4 深」。
+##    → 现在自己维护一份原始静止基准 _base，并用 _wrote 判断插件是否重算过：
+##        本帧读到的顶点 ≈ 上一帧我们写回的值  → 插件没重算，基准不变
+##        否则（插件重算了，即角色在动）      → 以读到的顶点作为新基准
+##      这样写回是幂等的、不再自反馈，同时角色动画照常跟随。
+##
+## ② 没有几何上限
+##    原来顶点可以一路穿过触点。现在每个顶点的「朝内位移」最多
+##    dist * cross_limit（默认 0.80），永不穿过触点，网格不会塌成一个点。
+##
+## 影响场改用 PressureField.soft_press_profile()（中心整片等强 + 平滑肩），
+## 保证是连续的圆形衰减，而不是矩形，也不会看起来像吸进去的黑洞。
+
+class_name SoftMeshDeformer
+extends GDCubismEffectCustom
+
+@export var enabled: bool = true
+## 旧路径：单一触点。hand_rig 缺席时用它（行为与 STEP 2 完全一致）。
+@export var touch: TouchManager = null
+## STEP 3 路径：虚拟手（Palm + Fingers）。有它且 use_hand_rig=true 时优先。
+@export var hand_rig: HandRig = null
+@export var use_hand_rig: bool = true
+
+@export_group("接触形变")
+## 影响半径（模型画布像素）。工程模型高约 6852px，190 约占身高 2.8%（一根手指）。
+## ⚠ STEP 3 起：这条只在「单触点回退路径」生效；走 HandRig 时半径由每颗接触自带
+##   （palm_radius / finger_radius），以保证掌心与手指粗细不同、且都是模型空间量。
+@export var radius: float = 190.0
+## 触点中心的最大凹陷深度（像素）—— 心智模型：我要按出多深的一个坑。
+@export var depth: float = 42.0
+## 影响场「平顶」半径占 radius 的比例：这片区域内压力恒为满值。
+## 0.34 × 190 = 64.6px，使「满压区」刚好覆盖 cross_limit 的饱和点（depth/cross_limit = 58.3px），
+## 于是峰值能吃满 depth，而触点附近仍按 cross_limit 线性收，不会塌成一点。
+@export_range(0.0, 0.6, 0.01) var flat_top: float = 0.34
+## 平顶之外的肩部衰减指数：越小过渡越宽、越大越尖锐。
+@export_range(0.5, 6.0, 0.1) var power: float = 1.8
+## 几何上限：顶点朝触点方向最多走完「它到触点的距离」的多少（必须 < 1）。
+## 0.80 → 触点附近的压缩比约 5 倍：既压得下去，又不会把网格挤成一个点。
+@export_range(0.30, 0.98, 0.01) var cross_limit: float = 0.80
+## 中心按压的同时给外围一个很轻的外鼓，模拟软组织体积被挤向周围。
+@export_range(0.0, 0.5, 0.01) var volume_compensation: float = 0.13
+## 鼠标移动时的横向拖拽量；越大越像手指在皮肤上带动表面。
+@export_range(0.0, 1.0, 0.01) var drag_amount: float = 0.22
+
+@export_group("弹簧物理")
+## 目标位移跟随速度。太高会像硬塑料，太低会拖泥带水。
+@export_range(1.0, 80.0, 1.0) var spring_strength: float = 34.0
+@export_range(0.0, 1.0, 0.01) var spring_damping: float = 0.78
+## 松手后的回弹强度。
+@export_range(1.0, 80.0, 1.0) var recovery_strength: float = 22.0
+@export_range(0.0, 1.0, 0.01) var recovery_damping: float = 0.82
+@export var max_displacement: float = 85.0
+
+@export_group("范围与性能")
+@export var only_visible: bool = true
+@export var deform_neighbor_meshes: bool = true
+## 只处理触点附近的 ArtMesh，避免每帧重建所有空网格。
+@export var mesh_search_margin: float = 1.25
+## 判定「插件是否重算过这个顶点」的距离容差（像素）。略大于浮点误差即可。
+@export var regen_epsilon: float = 0.5
+
+var _meshes: Dictionary = {}
+var _offsets: Dictionary = {}       # mesh key -> PackedVector2Array  当前形变位移
+var _velocities: Dictionary = {}    # mesh key -> PackedVector2Array  弹簧速度
+var _base: Dictionary = {}          # mesh key -> PackedVector2Array  原始静止顶点
+var _wrote: Dictionary = {}         # mesh key -> PackedVector2Array  上一帧实际写回的位置
+var _aabbs: Dictionary = {}         # mesh key -> Rect2
+var _tri_cache: Dictionary = {}     # mesh key -> PackedInt32Array
+var _draw_order: Dictionary = {}
+var _geometry_ready: bool = false
+## 诊断：状态数组被重建的次数（顶点数变化 / 插件重建网格时发生）
+var _state_resets: int = 0
+## 诊断：重置时「丢掉过非零形变」的次数与样本（>0 说明形变被吃掉）
+var _state_lost: int = 0
+var _state_lost_samples: Array = []
+## 诊断：_ensure_state 被调用总次数
+var _ensure_calls: int = 0
+var _last_pick_pos: Vector2 = Vector2.INF
+var _last_pick_result: bool = false
+## STEP 3 诊断：本帧实际参与合并的接触数 / 接触数组（只读快照，给探针用）
+var _last_contacts: Array = []
+## STEP 3 诊断：本帧单顶点「合并后」目标位移峰值
+var _last_target_peak: float = 0.0
+
+const _EMPTY_CONTACTS: Array = []
+
+func _ready() -> void:
+	if not cubism_init.is_connected(_on_cubism_init):
+		cubism_init.connect(_on_cubism_init)
+	if not cubism_epilogue.is_connected(_on_cubism_epilogue):
+		cubism_epilogue.connect(_on_cubism_epilogue)
+
+func _on_cubism_init(model) -> void:
+	_meshes = model.get_meshes()
+	_offsets.clear()
+	_velocities.clear()
+	_base.clear()
+	_wrote.clear()
+	_aabbs.clear()
+	_tri_cache.clear()
+	_draw_order.clear()
+	_geometry_ready = false
+	_last_pick_pos = Vector2.INF
+	print("[SoftMeshDeformer] Live2D ArtMesh: %d meshes" % _meshes.size())
+
+func _on_cubism_epilogue(_model, delta: float) -> void:
+	if not enabled:
+		_step(delta, false, _EMPTY_CONTACTS)
+		return
+
+	# Cubism 会重新生成当前动画后的网格（但没有变化时不会重算，
+	# 所以我们自己用 _base + _wrote 把「原始基准」和「我们写回的值」分开记）。
+	_refresh_geometry()
+
+	var contacts: Array = _collect_contacts()
+	_last_contacts = contacts
+	# STEP 3：形变强度只在「真的有接触在受力」时才走 spring 分支。
+	# 旧版这里恒传 true，导致松手（active=false）后仍按 pressure=0 的
+	# 0.55 深度下限一直凹着 —— 松手不回弹的隐性 bug，顺手修正（对应测试项 J）。
+	_step(delta, _any_contact_on(contacts), contacts)
+
+## 收集本帧的接触数组。
+##   ① HandRig 在场 → 它给出 Palm + Fingers（每颗自带模型空间半径与权重）
+##   ② 否则退回单触点（半径 = max(本脚本 radius, touch.radius)），
+##      数值路径与 STEP 2 逐项一致，保证冻结的手感不漂移。
+func _collect_contacts() -> Array:
+	if use_hand_rig and hand_rig != null and is_instance_valid(hand_rig) and hand_rig.enabled:
+		var rigs: Array = hand_rig.contacts
+		if not rigs.is_empty():
+			return rigs
+	if touch == null or not is_instance_valid(touch):
+		return _EMPTY_CONTACTS
+	var c := HandContact.from_touch(touch.position, maxf(radius, touch.radius),
+		clampf(touch.pressure, 0.0, 1.0), touch.velocity, bool(touch.active))
+	return [c]
+
+## 是否至少有一颗接触正在受力（决定走 spring 还是 recovery）
+func _any_contact_on(contacts: Array) -> bool:
+	for c in contacts:
+		if c != null and c.is_on():
+			return true
+	return false
+
+## 所有接触的影响半径最大值（外圈剔除的保守范围）
+func _max_contact_radius(contacts: Array) -> float:
+	var best := 0.0
+	for c in contacts:
+		if c != null and c.is_on():
+			best = maxf(best, c.radius)
+	return best
+
+## 某个 AABB 是否落在任意一颗接触的影响范围内
+func _rect_near_contacts(rect: Rect2, contacts: Array, margin: float) -> bool:
+	for c in contacts:
+		if c == null or not c.is_on():
+			continue
+		if _rect_near(rect, c.position, c.radius * margin):
+			return true
+	return false
+
+## 统一的每帧步进（按压 / 松手回弹都走这里，保证两条路径完全一致）
+##
+## STEP 3 与 STEP 2 的唯一结构差异：
+##   单触点 `target = f(一个中心)`  →  `target = ContactBlend.merge(contacts)`
+## contacts 只有一颗时，ContactBlend 的算式与 STEP 2 逐项相同（含拖动限幅与
+## cross_limit 的施加顺序），所以单触点手感不会有任何漂移。
+func _step(delta: float, touching: bool, contacts: Array) -> void:
+	if _meshes.is_empty():
+		return
+	var search_radius: float = _max_contact_radius(contacts)
+	_last_target_peak = 0.0
+
+	for key in _meshes:
+		var mi = _meshes[key]
+		if not is_instance_valid(mi) or mi.mesh == null or not (mi.mesh is ArrayMesh):
+			continue
+		if only_visible and not mi.visible:
+			continue
+
+		var arr: Array = mi.mesh.surface_get_arrays(0)
+		if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+			continue
+		var live: PackedVector2Array = arr[Mesh.ARRAY_VERTEX]
+		if live.is_empty():
+			continue
+
+		# 远处网格：既没有形变残留就不必处理（STEP 3：对任意一颗接触都远才算远）
+		if _aabbs.has(key):
+			if not _rect_near_contacts(_aabbs[key] as Rect2, contacts, mesh_search_margin):
+				if not _has_nonzero_offset(key):
+					continue
+
+		_ensure_state(key, live.size())
+		var offsets: PackedVector2Array = _offsets[key]
+		var velocities: PackedVector2Array = _velocities[key]
+		var bases: PackedVector2Array = _base[key]
+		var wrote: PackedVector2Array = _wrote[key]
+		var moved := PackedVector2Array()
+		moved.resize(live.size())
+
+		var touched_any: bool = false
+		var eps2: float = regen_epsilon * regen_epsilon
+
+		for i in live.size():
+			var lb: Vector2 = live[i]
+
+			# ── 基准跟踪：插件这一帧有没有重算这个顶点？──
+			#   wrote 是「上一帧我们写回去的位置」。若读到的顶点仍等于它，
+			#   说明插件没有重算（我们的形变还在），基准保持原样；
+			#   否则说明插件重算过（角色在动 / 网格重建），以读到的顶点作为新基准。
+			var w: Vector2 = wrote[i]
+			if w == Vector2.INF or lb.distance_squared_to(w) > eps2:
+				bases[i] = lb
+			var bp: Vector2 = bases[i]
+
+			# ── 多触点合并：Palm + 各 Finger 全部算完再统一夹 cross_limit ──
+			#    （单触点回退时，merge 内部算式与 STEP 2 逐项相同）
+			var target: Vector2 = Vector2.ZERO
+			if touching:
+				target = ContactBlend.merge(bp, contacts, depth, flat_top, power,
+					volume_compensation, drag_amount, cross_limit, 0.0)
+				var tlen: float = target.length()
+				if tlen > _last_target_peak:
+					_last_target_peak = tlen
+
+			var v: Vector2 = velocities[i]
+			var cur: Vector2 = offsets[i]
+			var strength: float = spring_strength if touching else recovery_strength
+			var damp: float = spring_damping if touching else recovery_damping
+			# 半隐式弹簧：比单纯 lerp 更接近「肉」的响应
+			v += (target - cur) * strength * delta
+			v *= pow(clampf(damp, 0.0, 0.9999), delta * 60.0)
+			cur += v * delta
+
+			if cur.length() > max_displacement:
+				cur = cur.normalized() * max_displacement
+				v *= 0.25
+
+			offsets[i] = cur
+			velocities[i] = v
+			moved[i] = bp + cur
+
+			if cur.length_squared() > 0.0001:
+				touched_any = true
+
+		if touched_any:
+			_offsets[key] = offsets
+			_velocities[key] = velocities
+			_base[key] = bases
+			_wrote[key] = moved
+			_write_vertices(mi.mesh, moved)
+
+	_cleanup_resting_states(touching, contacts, search_radius)
+
+## 收集每个 ArtMesh 的 AABB / 绘制顺序 / 三角形索引。
+##
+## ⚠ 这里有一个 STEP 2 就存在的隐藏坑：如果第一帧 epilogue 早于插件生成 ArtMesh，
+##   扫描会一个网格都拿不到，却仍把 _geometry_ready 设成 true —— 于是 _aabbs
+##   永远是空的，AABB 早退彻底失效：每帧都要处理全部 1162 个网格
+##   （实测 90 帧 22.8 秒，_state_resets 冲到 12 万次）。
+##   现在改成「没扫到东西就不置位」，下一帧会自然重试。
+func _refresh_geometry() -> void:
+	if _geometry_ready and not _aabbs.is_empty():
+		return
+	for key in _meshes:
+		var mi = _meshes[key]
+		if not is_instance_valid(mi) or mi.mesh == null or not (mi.mesh is ArrayMesh):
+			continue
+		var arr: Array = mi.mesh.surface_get_arrays(0)
+		if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+			continue
+		var verts: PackedVector2Array = arr[Mesh.ARRAY_VERTEX]
+		if verts.is_empty():
+			continue
+		var mn: Vector2 = verts[0]
+		var mx: Vector2 = verts[0]
+		for v in verts:
+			mn.x = minf(mn.x, v.x)
+			mn.y = minf(mn.y, v.y)
+			mx.x = maxf(mx.x, v.x)
+			mx.y = maxf(mx.y, v.y)
+		if not (is_finite(mn.x) and is_finite(mn.y) and is_finite(mx.x) and is_finite(mx.y)):
+			continue
+		# ⚠ 退化网格（所有顶点挤在同一点）也照样缓存：它的 AABB 就是一个点，
+		#   _rect_near 的「最近点」判距依然成立，于是远离手时同样能被早退跳过。
+		#   早先这里 continue 掉了 ~899 个退化网格，导致它们每帧都走全套流程，
+		#   _state_resets 白白涨到 12 万次（功能没错，纯浪费）。
+		_aabbs[key] = Rect2(mn, mx - mn)
+		_draw_order[key] = mi.get_index()
+		if arr[Mesh.ARRAY_INDEX] != null:
+			_tri_cache[key] = (arr[Mesh.ARRAY_INDEX] as PackedInt32Array).duplicate()
+	if _aabbs.is_empty():
+		return          # 插件还没生成 ArtMesh → 保持未就绪，下一帧重试
+	_geometry_ready = true
+
+func _ensure_state(key: String, count: int) -> void:
+	_ensure_calls += 1
+	if _offsets.has(key) and (_offsets[key] as PackedVector2Array).size() == count:
+		return
+	var old_size: int = -1
+	var lost: float = 0.0
+	if _offsets.has(key):
+		var prev: PackedVector2Array = _offsets[key]
+		old_size = prev.size()
+		for x in prev:
+			lost = maxf(lost, x.length())
+	_state_resets += 1
+	if lost > 0.5:
+		_state_lost += 1
+		if _state_lost_samples.size() < 6:
+			_state_lost_samples.append("%s old=%d new=%d lost=%.2f" % [key, old_size, count, lost])
+
+	var o := PackedVector2Array()
+	var v := PackedVector2Array()
+	var b := PackedVector2Array()
+	var wr := PackedVector2Array()
+	o.resize(count)
+	v.resize(count)
+	b.resize(count)
+	wr.resize(count)
+	for i in count:
+		o[i] = Vector2.ZERO
+		v[i] = Vector2.ZERO
+		b[i] = Vector2.INF      # INF = 尚未建立基准 → 首帧以读到的顶点为基准
+		wr[i] = Vector2.INF
+	_offsets[key] = o
+	_velocities[key] = v
+	_base[key] = b
+	_wrote[key] = wr
+
+## 清掉已经静止的状态，避免 Dictionary 无限增长。
+## 注意：触点在附近时不要清 —— 否则那些「本帧恰好压力为 0」的网格会被反复
+## 建了又删（实测一帧能有 200+ 次无意义重建）。只有离开影响范围才回收。
+## STEP 3：判定条件从「一个圆心」变成「任意一颗接触的圆」。
+func _cleanup_resting_states(touching: bool, contacts: Array, search_radius: float) -> void:
+	if _offsets.is_empty():
+		return
+	var remove_keys: Array[String] = []
+	for key in _offsets:
+		var offsets: PackedVector2Array = _offsets[key]
+		var moving: bool = false
+		for o in offsets:
+			if o.length_squared() > 0.01:
+				moving = true
+				break
+		if moving:
+			continue
+		if touching and search_radius > 0.0 and _aabbs.has(key):
+			if _rect_near_contacts(_aabbs[key] as Rect2, contacts, mesh_search_margin):
+				continue        # 还在影响范围内，留着复用
+		remove_keys.append(key)
+	for key in remove_keys:
+		_offsets.erase(key)
+		_velocities.erase(key)
+		_base.erase(key)
+		_wrote.erase(key)
+
+func _write_vertices(am: ArrayMesh, verts: PackedVector2Array) -> void:
+	if am == null or am.get_surface_count() <= 0:
+		return
+	var arr: Array = am.surface_get_arrays(0)
+	if arr.is_empty():
+		return
+	arr[Mesh.ARRAY_VERTEX] = verts
+	var fmt: int = am.surface_get_format(0)
+	am.clear_surfaces()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr, [], {}, fmt)
+
+func _rect_near(rect: Rect2, center: Vector2, r: float) -> bool:
+	var closest := Vector2(
+		clampf(center.x, rect.position.x, rect.end.x),
+		clampf(center.y, rect.position.y, rect.end.y)
+	)
+	return closest.distance_squared_to(center) <= r * r
+
+func _has_nonzero_offset(key: String) -> bool:
+	if not _offsets.has(key):
+		return false
+	for o in (_offsets[key] as PackedVector2Array):
+		if o.length_squared() > 0.01:
+			return true
+	return false
+
+## 精确三角形拾取：TouchManager 用它判断鼠标是否真的碰到 Live2D。
+func is_point_on_model(pt: Vector2) -> bool:
+	if _meshes.is_empty():
+		return false
+
+	# 鼠标不动时不重复做整模型三角形测试。
+	if pt.distance_squared_to(_last_pick_pos) < 1.0:
+		return _last_pick_result
+	_last_pick_pos = pt
+
+	var best_order: int = -1
+	var hit: bool = false
+	for key in _meshes:
+		var mi = _meshes[key]
+		if not is_instance_valid(mi) or mi.mesh == null or not (mi.mesh is ArrayMesh):
+			continue
+		if only_visible and not mi.visible:
+			continue
+		var arr: Array = mi.mesh.surface_get_arrays(0)
+		if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null or arr[Mesh.ARRAY_INDEX] == null:
+			continue
+		var verts: PackedVector2Array = arr[Mesh.ARRAY_VERTEX]
+		if verts.is_empty():
+			continue
+		if not _point_in_aabb(pt, verts):
+			continue
+		var idxs: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+		var tri_count: int = idxs.size() / 3
+		for t in tri_count:
+			var ia: int = idxs[t * 3]
+			var ib: int = idxs[t * 3 + 1]
+			var ic: int = idxs[t * 3 + 2]
+			if ia < 0 or ib < 0 or ic < 0 or ia >= verts.size() or ib >= verts.size() or ic >= verts.size():
+				continue
+			if _point_in_triangle(pt, verts[ia], verts[ib], verts[ic]):
+				var order: int = mi.get_index()
+				if order >= best_order:
+					best_order = order
+					hit = true
+				break
+	_last_pick_result = hit
+	return hit
+
+func _point_in_aabb(pt: Vector2, verts: PackedVector2Array) -> bool:
+	var mn: Vector2 = verts[0]
+	var mx: Vector2 = verts[0]
+	for v in verts:
+		mn.x = minf(mn.x, v.x)
+		mn.y = minf(mn.y, v.y)
+		mx.x = maxf(mx.x, v.x)
+		mx.y = maxf(mx.y, v.y)
+	return pt.x >= mn.x and pt.x <= mx.x and pt.y >= mn.y and pt.y <= mx.y
+
+func _point_in_triangle(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> bool:
+	var d1: float = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+	var d2: float = (c.x - b.x) * (p.y - b.y) - (c.y - b.y) * (p.x - b.x)
+	var d3: float = (a.x - c.x) * (p.y - c.y) - (a.y - c.y) * (p.x - c.x)
+	var neg: bool = d1 < 0.0 or d2 < 0.0 or d3 < 0.0
+	var pos: bool = d1 > 0.0 or d2 > 0.0 or d3 > 0.0
+	return not (neg and pos)
+
+======================================================================
+// 文件: scripts/gd/soft/pressure_field.gd   (93 行)
+======================================================================
+## 压力场（SoftTouch 模块）—— 决定「离触点多远，受力多少」
+##
+## 这是整套软体手感的核心：输入只有一个距离，输出 0~1 的影响系数。
+##   中心 = 1.0   近中心 = 0.8   中距离 = 0.4   边缘≈0.05   外面 = 0
+##
+## 与旧的「矩形区域整体变形」的根本区别：
+##   旧做法  → 在不在矩形内（布尔），在就整体平移
+##   本做法  → 连续衰减（float），每个顶点各算各的
+## 所以不会出现截图里那种方块状一起动的现象。
+##
+## 本文件不引用任何 Live2D / UI 系统，纯数学。
+
+class_name PressureField
+extends RefCounted
+
+## 最基础的幂衰减：t = 1 - d/r，返回 t^power
+##
+## power 越大，影响越集中在触点附近：
+##   power = 2 → 平缓（像按海绵，大范围动）
+##   power = 4 → 明显局部（默认，像按皮肤）
+##   power = 8 → 非常尖锐（像针尖，几乎只有中心动）
+static func falloff(distance: float, radius: float, power: float = 4.0) -> float:
+	if radius <= 0.0:
+		return 0.0
+	if distance >= radius:
+		return 0.0
+	if distance <= 0.0:
+		return 1.0
+	var t: float = 1.0 - distance / radius
+	return pow(t, maxf(power, 0.01))
+
+
+## 平滑版：先幂衰减，再过一次 smoothstep，边缘收得更自然（无一级导数突跳）
+## 若发现「变形边缘有一圈硬线」，把 falloff 换成它即可。
+static func smooth_falloff(distance: float, radius: float, power: float = 4.0) -> float:
+	var f: float = falloff(distance, radius, power)
+	return f * f * (3.0 - 2.0 * f)
+
+
+## 椭圆版：px / py 传两个半径，可做「横向比纵向更宽」的影响场（贴皮肤走向）
+static func falloff_ellipse(offset: Vector2, radius_x: float, radius_y: float, power: float = 4.0) -> float:
+	if radius_x <= 0.0 or radius_y <= 0.0:
+		return 0.0
+	var nx: float = offset.x / radius_x
+	var ny: float = offset.y / radius_y
+	var d: float = sqrt(nx * nx + ny * ny)
+	if d >= 1.0:
+		return 0.0
+	var t: float = 1.0 - d
+	return pow(t, maxf(power, 0.01))
+
+
+## 平滑阶梯 0→1（smoothstep），用于让边缘无一级导数突跳
+static func smoothstep01(x: float) -> float:
+	var t: float = clampf(x, 0.0, 1.0)
+	return t * t * (3.0 - 2.0 * t)
+
+
+## 「平顶 + 平滑肩」按压 profile（STEP 2 用的就是它）
+##
+## 与 falloff 的区别（这是「凹陷能不能真的凹下去」的关键）：
+##   falloff(d,r,3.5) 在 d=0.25r 处只剩 0.30，力被摊薄在很大一片，中心反而不够强；
+##   本函数在 d <= flat_top*r 的整片区域内恒为 1.0（中心整片等强），
+##   之后用 (1-u)^power 衰减，再过 smoothstep 收尾，到 d=r 处严格为 0。
+##
+## 参数：
+##   flat_top 平顶半径占 r 的比例（0.15~0.35 比较像皮肤）
+##   power    肩部衰减指数，越小过渡越宽
+static func soft_press_profile(distance: float, radius: float,
+		flat_top: float = 0.18, power: float = 1.8) -> float:
+	if radius <= 0.0:
+		return 0.0
+	if distance >= radius:
+		return 0.0
+	if distance <= 0.0:
+		return 1.0
+	var ft: float = clampf(flat_top, 0.0, 0.95)
+	var t: float = distance / radius
+	if t <= ft:
+		return 1.0
+	var u: float = (t - ft) / (1.0 - ft)          # 0（平顶边缘）→ 1（影响半径边缘）
+	var f: float = pow(1.0 - u, maxf(power, 0.01))
+	return f * f * (3.0 - 2.0 * f)                 # smoothstep 收尾，r 处为 0
+
+
+## 高斯衰减（更「软」的选择，中心平顶、尾巴长）
+## sigma 约等于影响半径的一半时手感接近真实皮肤。
+static func gaussian(distance: float, sigma: float) -> float:
+	if sigma <= 0.0:
+		return 0.0
+	var s: float = distance / sigma
+	return exp(-0.5 * s * s)
+
+======================================================================
+// 文件: scripts/gd/soft/shadow_brush.gd   (149 行)
+======================================================================
+## ShadowBrush —— 一枚「接触阴影画笔」（SoftTouch 模块 · STEP 4）
+##
+## 分层铁律（STEP 4 明确要求）：
+##   HandContact   只描述「手」（纯数据）
+##   HandRig       只负责摆放接触
+##   ShadowBrush   只负责【画】：纹理 / 位置 / 旋转 / 缩放 / Alpha / 可见性 / 生命周期
+##   ShadowField   只负责「哪颗接触配哪枚笔刷」
+##
+## 本文件【不】碰 MeshInstance2D / ArrayMesh / 顶点 / 弹簧 —— 与 SoftMeshDeformer 完全解耦。
+## 它只是一枚挂在模型子树里的 Sprite2D，视觉上叠在模型表面附近。
+##
+## 坐标系：父节点 = 模型节点（或任何「模型空间」Node2D），所以 position/scale
+## 全是模型空间（画布像素）。Camera2D.zoom 只改屏幕视觉大小，不改这里的任何数值。
+##
+## 禁止事项对照（Master STEP 4 指令）：
+##   ✗ 不当固定位置的贴纸      —— 位置/旋转/缩放/Alpha 全部由接触数据逐帧驱动
+##   ✗ 不逐帧播放序列动画      —— 纹理是静态 PNG，动态感来自压力映射
+##   ✗ 不写进 Live2D 顶点      —— 本类没有任何 mesh 访问代码
+##   ✗ 不做材质判断            —— SKIN/CLOTH 留给 STEP 5
+
+class_name ShadowBrush
+extends Sprite2D
+
+## ── 压力 → Alpha 映射（全部 @export，不写死视觉参数）──
+@export_group("Alpha")
+## 压力为 0 时的透明度（0 = 完全透明）
+@export_range(0.0, 1.0, 0.01) var min_alpha: float = 0.0
+## 压力满格时的透明度。0.55 起步：阴影要「垫在角色下面」而不是糊成黑块
+@export_range(0.0, 1.0, 0.01) var max_alpha: float = 0.55
+## 压力响应曲线指数：<1 = 轻压就有明显阴影；>1 = 重压才显影
+@export_range(0.1, 4.0, 0.05) var pressure_gamma: float = 0.8
+
+## ── 压力 → 缩放 映射 ──
+@export_group("Scale")
+## 压力对尺寸的增益（0.05~0.15 区间起步）：scale = 1.0 + gain × pressure
+## Master 指令：变化控制在 5%~15%，禁止夸张膨胀
+@export_range(0.0, 0.3, 0.01) var scale_pressure_gain: float = 0.10
+
+## ── 尺寸换算 ──
+@export_group("尺寸")
+## 接触半径 → 精灵宽度的倍率：精灵宽 = 2 × contact.radius × diameter_factor。
+## 素材是柔边椭圆（越往外越透明），1.15 让「肉眼可见的深色核心」大致等于接触半径。
+@export_range(0.5, 3.0, 0.05) var diameter_factor: float = 1.15
+
+## ── 旋转微调 ──
+@export_group("旋转")
+## 纹理作者的「手朝向」与素材原始朝向的夹角（度）。素材没有约定朝向时保持 0。
+@export_range(-180.0, 180.0, 1.0) var rotation_offset_deg: float = 0.0
+
+## ── 平滑 ──
+@export_group("平滑")
+## Alpha / 缩放的趋近速率（1/秒）。0 = 不平滑（直接跳变，测试用）
+@export_range(0.0, 30.0, 0.5) var smoothing: float = 10.0
+
+## 生命周期标记：false = 空闲待回收（ShadowField 复用池）
+var in_use: bool = false
+## 首次赋值跳过平滑（否则笔刷会从旧值慢慢飘到新值，看起来像「闪一下」）
+var _primed: bool = false
+var _cur_alpha: float = 0.0
+var _cur_grow: float = 1.0
+## 诊断：本笔刷一生被应用过多少次接触
+var apply_count: int = 0
+
+
+func _init() -> void:
+	# 阴影垫在角色表面附近：中心在接触点上，纹理以中心对齐。
+	# 注：Sprite2D 属 Node2D 系，不参与 Control 的 mouse_filter 拾取，天然不挡命中测试。
+	centered = true
+
+
+## 用一颗接触刷新本笔刷。纯视觉，不读任何物理状态。
+## 返回是否成功（NaN / 非有限输入 → 立即隐藏并返回 false，宁可不显示也不渲染垃圾）。
+func apply_contact(c: HandContact, delta: float) -> bool:
+	apply_count += 1
+	if c == null or not is_instance_valid(c):
+		visible = false
+		return false
+
+	# ── NaN / 非有限输入防护（测试项 K）──
+	var pos: Vector2 = c.position
+	var dir: Vector2 = c.safe_direction()
+	if not is_finite(pos.x) or not is_finite(pos.y) or not is_finite(c.radius) \
+			or not is_finite(dir.x) or not is_finite(dir.y) or c.radius <= 0.0:
+		visible = false
+		return false
+
+	# ── 接触已结束 → 隐藏（测试项 J；返回 true 表示「合法处理」，不算 NaN 拦截）──
+	if not c.active:
+		visible = false
+		return true
+
+	# ── 位置（模型空间，逐帧跟随接触）──
+	position = pos
+
+	# ── 旋转（跟随接触方向；方向本身由 HandRig 的死区保证静止不抖）──
+	rotation = dir.angle() + deg_to_rad(rotation_offset_deg)
+
+	# ── 压力 → Alpha ──
+	# 用 effective_pressure()（pressure × weight）：指尖权重 0.78，阴影天然比掌心淡
+	var eff: float = clampf(c.effective_pressure(), 0.0, 1.0)
+	var target_alpha: float = lerpf(min_alpha, max_alpha, pow(eff, pressure_gamma))
+
+	# ── 压力 → 缩放（5%~15% 轻微胀缩）──
+	var target_grow: float = 1.0 + scale_pressure_gain * eff
+
+	# ── 平滑（首帧直接落位）──
+	if not _primed or smoothing <= 0.0 or delta <= 0.0:
+		_cur_alpha = target_alpha
+		_cur_grow = target_grow
+		_primed = true
+	else:
+		var w: float = 1.0 - exp(-smoothing * delta)
+		_cur_alpha = lerpf(_cur_alpha, target_alpha, w)
+		_cur_grow = lerpf(_cur_grow, target_grow, w)
+
+	modulate.a = clampf(_cur_alpha, 0.0, 1.0)
+
+	# ── 尺寸：接触半径（模型空间）→ 精灵宽（模型空间）──
+	var tex_w: float = 1.0
+	if texture != null:
+		tex_w = float(texture.get_width())
+	var want: float = 2.0 * c.radius * diameter_factor * _cur_grow
+	var s: float = want / maxf(tex_w, 1.0)
+	if not is_finite(s) or s <= 0.0:
+		visible = false
+		return false
+	scale = Vector2(s, s)
+
+	visible = true
+	return true
+
+
+## 隐藏并回到池里
+func sleep() -> void:
+	in_use = false
+	visible = false
+	_primed = false
+	_cur_alpha = 0.0
+	_cur_grow = 1.0
+
+
+## 一行摘要（诊断 / 报告用）
+func describe() -> String:
+	var tex_name := "<null>"
+	if texture != null:
+		tex_name = texture.resource_path.get_file()
+	return "brush tex=%-24s pos=(%8.1f,%8.1f) rot=%6.1f° scale=%.3f alpha=%.3f visible=%s" % [
+		tex_name, position.x, position.y, rad_to_deg(rotation), scale.x, modulate.a, visible]
+
+======================================================================
+// 文件: scripts/gd/soft/shadow_field.gd   (147 行)
+======================================================================
+## ShadowField —— 接触 → 阴影画笔 的分配台（SoftTouch 模块 · STEP 4）
+##
+## 数据流（Master STEP 4 指令的架构）：
+##   Mouse → TouchManager → HandRig(HandContact[]) → ShadowField → ShadowBrush[]
+##         → 位置/旋转/缩放/Alpha → 模型空间 Shadow → 显示在 Live2D 模型附近
+##
+## 职责边界：
+##   · 只消费 HandContact（数据），为每颗接触维护一枚 ShadowBrush
+##   · 掌心配掌纹理，手指按序配 fingertip_01~05，绝不合并成一张大图
+##   · 笔刷是本节点的 Sprite2D 子节点 —— 本节点必须挂在「模型空间」下
+##     （生产环境挂在 GDCubismUserModel 下面，随模型一起被 Camera2D 缩放）
+##   · 不碰 MeshInstance2D / 顶点 / 弹簧 —— 与 SoftMeshDeformer 完全解耦
+##
+## 不做（留 STEP 5）：SKIN/THIN_CLOTH/THICK_CLOTH 分类、摩擦、褶皱、区域判定。
+
+class_name ShadowField
+extends Node2D
+
+## 数据源（二选一，hand_rig 优先）
+@export var hand_rig: HandRig = null
+## hand_rig 缺席时的兜底：把 TouchManager 的单触点转成一颗 DEFAULT 接触
+@export var touch: TouchManager = null
+@export var enabled: bool = true
+
+@export_group("纹理（STEP 4 第一阶段 · common）")
+## 掌心阴影。palm_soft 优先，palm_pressure_soft 备用
+@export var palm_texture: Texture2D = null
+## 手指阴影池（按指序 01~05 轮换，不重复用同一张）
+@export var finger_textures: Array[Texture2D] = []
+## 拇指（预留，STEP 3 默认不出拇指）
+@export var thumb_texture: Texture2D = null
+
+@export_group("渲染层")
+## z_index：要压过 Live2D 网格的绘制。gd_cubism 网格在模型节点自身绘制，
+## 子节点默认画在父节点之后，这里再垫一层保险。⚠ 真机需复核是否被模型覆盖。
+@export_range(0, 4096, 1) var brush_z_index: int = 100
+
+@export_group("兜底单触点")
+## touch 兜底路径的接触半径（模型空间）
+@export_range(10.0, 400.0, 1.0) var fallback_radius: float = 190.0
+
+## 笔刷对象池（复用，不逐帧 new/free —— 防止 GC 抖动与「闪烁」）
+var _pool: Array[ShadowBrush] = []
+## 诊断：总创建数 / 当前激活数 / NaN 拦截数
+var brushes_created: int = 0
+var active_count: int = 0
+var nan_rejects: int = 0
+
+
+func _ready() -> void:
+	z_index = brush_z_index
+
+
+func _process(delta: float) -> void:
+	if not enabled:
+		_sleep_all()
+		return
+	var contacts: Array[HandContact] = _gather_contacts()
+	update_contacts(contacts, delta)
+
+
+## 收集本帧接触：HandRig 优先；否则 TouchManager 单触点兜底
+func _gather_contacts() -> Array[HandContact]:
+	var out: Array[HandContact] = []
+	if hand_rig != null and is_instance_valid(hand_rig):
+		return hand_rig.contacts
+	if touch != null and is_instance_valid(touch):
+		out.append(HandContact.from_touch(touch.position, fallback_radius,
+			clampf(touch.pressure, 0.0, 1.0), touch.velocity, bool(touch.active)))
+	return out
+
+
+## 核心：把一组接触同步到笔刷池。公开给测试直接调（绕过 _process，确定性）。
+func update_contacts(contacts: Array[HandContact], delta: float = 0.0) -> void:
+	active_count = 0
+	if contacts == null:
+		contacts = []
+	var shown: int = 0
+	for c in contacts:
+		if c == null:
+			continue
+		# 只支持 PALM / FINGER（+THUMB 预留）；DEFAULT 走掌纹理
+		var brush: ShadowBrush = _acquire(shown)
+		brush.texture = _pick_texture(c, shown)
+		var ok: bool = brush.apply_contact(c, delta)
+		if not ok:
+			nan_rejects += 1
+			brush.sleep()
+			continue
+		shown += 1
+		if c.is_on():
+			active_count += 1
+	# 多余的笔刷全部收回（测试项 J：接触灭 → 笔刷藏）
+	for i in range(shown, _pool.size()):
+		_pool[i].sleep()
+
+
+## 取第 idx 枚笔刷（池不够就造）
+func _acquire(idx: int) -> ShadowBrush:
+	while _pool.size() <= idx:
+		var b := ShadowBrush.new()
+		b.visible = false
+		add_child(b)
+		_pool.append(b)
+		brushes_created += 1
+	var b: ShadowBrush = _pool[idx]
+	b.in_use = true
+	b.visible = false          # apply_contact 内部再点亮，避免一帧闪现
+	return b
+
+
+## 纹理选择：PALM/DEFAULT → 掌纹理；FINGER → 指池按序取模；THUMB → 拇指
+func _pick_texture(c: HandContact, idx: int) -> Texture2D:
+	match c.type:
+		HandContact.Type.PALM, HandContact.Type.DEFAULT:
+			return palm_texture
+		HandContact.Type.FINGER:
+			# idx-1：第 0 枚是掌心，手指从 idx=1 起；取模防止指池比手指数少
+			var fi: int = maxi(idx - 1, 0)
+			if finger_textures.is_empty():
+				return palm_texture
+			return finger_textures[fi % finger_textures.size()]
+		HandContact.Type.THUMB:
+			return thumb_texture if thumb_texture != null else palm_texture
+	return palm_texture
+
+
+func _sleep_all() -> void:
+	for b in _pool:
+		b.sleep()
+	active_count = 0
+
+
+## 当前可见笔刷数（报告用）
+func visible_count() -> int:
+	var n := 0
+	for b in _pool:
+		if b.visible:
+			n += 1
+	return n
+
+
+## 一行摘要（报告用）
+func describe() -> String:
+	return "ShadowField pool=%d visible=%d active=%d created=%d nan_rejects=%d z=%d" % [
+		_pool.size(), visible_count(), active_count, brushes_created, nan_rejects, z_index]
+
+======================================================================
+// 文件: scripts/gd/soft/soft_mesh.gd   (242 行)
+======================================================================
+## 软体网格节点（SoftTouch 模块 · 可视化 + 驱动）
+##
+## 职责：① 生成规则质点网格与结构约束；② 每帧把触点状态喂给 SoftSolver；
+##       ③ 把「当前形状」与「原始形状」同时画出来，让变形肉眼可见。
+##
+## 画出原始形状（半透明虚线）很重要——否则网格整体跟着鼠标跑时，
+## 你分不清到底是「局部凹陷」还是「整块平移」。
+##
+## 本节点不依赖 Live2D，可单独放进任何场景。
+
+class_name SoftMesh
+extends Node2D
+
+# ---------- 网格形状 ----------
+@export var columns: int = 20
+@export var rows: int = 14
+@export var mesh_size: Vector2 = Vector2(500.0, 350.0)
+## 是否钉住外圈（true = 像绷在框上的布；false = 自由漂浮，推荐先用 false）
+@export var pin_border: bool = false
+
+# ---------- 物理参数 ----------
+@export var damping: float = 0.96
+@export var gravity: Vector2 = Vector2.ZERO
+## 约束迭代次数。⚠ 不要用 8：约束每帧都解算，迭代越多 = 材料越硬，
+## 实测 stiffness>=0.2 或 iter>=4 时力道被吃掉 90% 以上（凹陷只剩 0.1px）。
+@export_range(1, 24, 1) var constraint_iterations: int = 2
+## 约束刚度。⚠ 极软才是对的：0.02~0.05。见 SoftSolver 顶部说明。
+@export_range(0.0, 1.0, 0.01) var stiffness: float = 0.03
+## 允许压缩（单向约束 / 抗拉不抗压）—— 见 SoftSolver.allow_compression 说明，
+## 这是「能不能凹下去」的关键开关，默认开。
+@export var allow_compression: bool = true
+@export var recovery_strength: float = 3.5
+## 锚定半径倍数：圈外锚死、圈内自由（见 SoftSolver.anchor_scale）
+@export var anchor_scale: float = 1.6
+
+# ---------- 触点参数 ----------
+## "target" 位置式（推荐）/ "force" 速度式
+@export var pressure_mode: String = "target"
+## 触点中心的**驱动深度**（像素）。
+## 注意：实际凹深 ≈ depth × 平衡系数（约 0.4，与 follow_rate / stiffness 有关），
+## 实测 depth=25 时凹陷约 9~10px。想更深就加大它。
+@export var touch_depth: float = 30.0
+## 每秒跟随速率。⚠ 太小凹陷会被约束吃掉（平衡位移 x ≈ D·follow/(follow+c)），
+## 实测 40 以上凹陷才接近目标深度。给「慢慢压下去」的观感请靠 pressure 渐变，别压这个值。
+@export var follow_rate: float = 40.0
+## 仅 force 模式用
+@export var touch_strength: float = 80.0
+@export_range(1.0, 12.0, 0.25) var touch_power: float = 2.5
+@export var drag_strength: float = 60.0
+
+# ---------- 显示 ----------
+@export var show_springs: bool = true
+@export var show_particles: bool = true
+@export var show_original_shape: bool = true
+@export var show_touch_field: bool = true
+
+# ---------- 颜色 ----------
+@export var color_spring := Color(0.45, 0.85, 0.95, 0.55)
+@export var color_particle := Color(0.85, 0.95, 1.0, 1.0)
+@export var color_ghost := Color(0.55, 0.6, 0.75, 0.28)
+@export var color_touch := Color(1.0, 0.42, 0.42, 0.9)
+
+var particles: Array[SoftParticle] = []
+var constraints: Array = []
+var solver: SoftSolver = SoftSolver.new()
+
+# 触点状态（由外部每帧 set_touch 注入）
+var touch_position: Vector2 = Vector2.ZERO
+var touch_active: bool = false
+var touch_velocity: Vector2 = Vector2.ZERO
+var touch_pressure: float = 0.0
+var touch_radius: float = 90.0
+
+var _ready_built: bool = false
+
+
+func _ready() -> void:
+	build()
+	_ready_built = true
+
+
+# =====================================================================
+#  网格生成
+# =====================================================================
+func build() -> void:
+	_build_particles()
+	_build_constraints()
+	_push_params()
+	solver.setup(particles, constraints)
+
+
+func _build_particles() -> void:
+	particles = []
+	var w: float = maxf(columns - 1, 1)
+	var h: float = maxf(rows - 1, 1)
+	for y in range(rows):
+		for x in range(columns):
+			var pos := Vector2(
+				float(x) / w * mesh_size.x,
+				float(y) / h * mesh_size.y
+			)
+			var pinned: bool = pin_border and (x == 0 or y == 0 or x == columns - 1 or y == rows - 1)
+			particles.append(SoftParticle.new(pos, pinned))
+
+
+func _build_constraints() -> void:
+	constraints = []
+	for y in range(rows):
+		for x in range(columns):
+			var index: int = y * columns + x
+			if x < columns - 1:
+				_add_constraint(index, index + 1)
+			if y < rows - 1:
+				_add_constraint(index, index + columns)
+			# 斜向约束：网格更抗剪切（拉起来不像平行四边形）。先去重，避免重复解算
+			if x < columns - 1 and y < rows - 1:
+				_add_constraint(index, (y + 1) * columns + x + 1)
+
+
+func _add_constraint(a: int, b: int) -> void:
+	var pa: SoftParticle = particles[a]
+	var pb: SoftParticle = particles[b]
+	constraints.append({
+		"a": a,
+		"b": b,
+		"rest": pa.position.distance_to(pb.position),
+	})
+
+
+func _push_params() -> void:
+	solver.damping = damping
+	solver.gravity = gravity
+	solver.iterations = constraint_iterations
+	solver.stiffness = stiffness
+	solver.allow_compression = allow_compression
+	solver.recovery = recovery_strength
+	solver.anchor_scale = anchor_scale
+	solver.pressure_mode = pressure_mode
+	solver.follow_rate = follow_rate
+	solver.touch_strength = touch_strength
+	solver.touch_power = touch_power
+	solver.drag_strength = drag_strength
+	# 压力越大凹得越深（0.4 → 1.0 倍），按住会慢慢陷进去
+	solver.depth = touch_depth * lerpf(0.4, 1.0, clampf(touch_pressure, 0.0, 1.0))
+
+
+# =====================================================================
+#  每帧
+# =====================================================================
+func _physics_process(delta: float) -> void:
+	if not _ready_built:
+		return
+	push_to_solver()
+	solver.step(delta)
+	queue_redraw()
+
+
+## 把「当前触点状态 + 当前参数」推给求解器。
+##
+## _physics_process 每帧调它；自检工具（tools\soft_selftest.gd）也调它 ——
+## 这样"测试跑的路径"和"游戏跑的路径"是同一条，不会出现
+## 「参数都对但就是不动」这种测试与运行不一致的坑（踩过一次）。
+func push_to_solver() -> void:
+	_push_params()
+	solver.touch_active = touch_active
+	solver.touch_position = touch_position
+	solver.touch_radius = touch_radius
+	solver.drag_velocity = touch_velocity
+
+
+## 外部注入触点（TouchManager 调它）。pos 用本节点的局部坐标。
+func set_touch(pos: Vector2, active: bool, velocity: Vector2 = Vector2.ZERO,
+		pressure: float = 0.0, radius: float = 90.0) -> void:
+	touch_position = pos
+	touch_active = active
+	touch_velocity = velocity
+	touch_pressure = pressure
+	touch_radius = radius
+
+
+## 松手
+func release() -> void:
+	touch_active = false
+	touch_velocity = Vector2.ZERO
+	touch_pressure = 0.0
+
+
+## 复位到原始形状
+func reset() -> void:
+	solver.setup(particles, constraints)
+	solver.reset()
+	queue_redraw()
+
+
+## 重建网格（改密度后调）
+func rebuild() -> void:
+	build()
+	queue_redraw()
+
+
+## 调试：最大位移
+func max_offset() -> float:
+	return solver.max_offset()
+
+
+# =====================================================================
+#  绘制
+# =====================================================================
+func _draw() -> void:
+	# 1) 原始形状（幽灵网格）——判断「局部变形 vs 整体平移」的参照物
+	if show_original_shape:
+		for c in constraints:
+			var pa: SoftParticle = particles[c["a"]]
+			var pb: SoftParticle = particles[c["b"]]
+			draw_line(pa.original_position, pb.original_position, color_ghost, 1.0)
+
+	# 2) 当前弹簧
+	if show_springs:
+		for c in constraints:
+			var pa: SoftParticle = particles[c["a"]]
+			var pb: SoftParticle = particles[c["b"]]
+			# 被拉伸得越厉害，线越亮——一眼能看出力往哪传
+			var stretch: float = clampf(
+				absf(pa.position.distance_to(pb.position) - float(c["rest"])) / 12.0, 0.0, 1.0)
+			var col: Color = color_spring.lerp(color_touch, stretch)
+			draw_line(pa.position, pb.position, col, 1.5)
+
+	# 3) 质点
+	if show_particles:
+		for p in particles:
+			var off: float = clampf(p.offset_from_original().length() / 40.0, 0.0, 1.0)
+			var col: Color = color_particle.lerp(color_touch, off)
+			var r: float = 2.0 + off * 1.5
+			draw_circle(p.position, r, col)
+
+	# 4) 触点影响场
+	if show_touch_field and touch_active:
+		var alpha: float = 0.25 + 0.35 * touch_pressure
+		draw_circle(touch_position, touch_radius, Color(color_touch.r, color_touch.g,
+			color_touch.b, alpha * 0.25), false, 2.0)
+		draw_circle(touch_position, 4.0, Color(1, 1, 1, 0.9))
+
+======================================================================
+// 文件: scripts/gd/soft/soft_particle.gd   (69 行)
+======================================================================
+## 软体质点（SoftTouch 模块 · 最底层数据单元）
+##
+## 每个质点用 Verlet 积分保存「当前位置 / 上一帧位置 / 原始位置」三个量：
+##   位置差 (position - previous_position) 即当前速度，不需要单独存速度变量，
+##   这是 Verlet 比欧拉法更稳的原因（约束修正会自然转成速度）。
+##
+## original_position 是「未受力时的静止位置」，回弹力就是朝它拉。
+##
+## 本文件不引用任何 Live2D / UI 系统，可独立使用。
+
+class_name SoftParticle
+extends RefCounted
+
+## 当前位置（求解器的工作坐标，会被约束不断修正）
+var position: Vector2 = Vector2.ZERO
+
+## 上一帧位置：Verlet 用它推算速度
+var previous_position: Vector2 = Vector2.ZERO
+
+## 静止位置：回弹力的目标
+var original_position: Vector2 = Vector2.ZERO
+
+## 质量与质量倒数。inv_mass = 0 表示「不可移动」（等价于 pinned），
+## 约束求解时按 inv_mass 加权分配修正量，这样重的地方动得少。
+var mass: float = 1.0
+var inv_mass: float = 1.0
+
+## 钉住的质点不参与积分，也不会被约束推动
+var pinned: bool = false
+
+## 累计位移标量（仅用于调试显示 / 自检断言，不影响物理）
+var max_offset_seen: float = 0.0
+
+
+func _init(pos: Vector2 = Vector2.ZERO, is_pinned: bool = false) -> void:
+	position = pos
+	previous_position = pos
+	original_position = pos
+	pinned = is_pinned
+	inv_mass = 0.0 if is_pinned else 1.0 / maxf(mass, 0.0001)
+
+
+## 相对原始位置的总位移（当前偏离静止状态多少）
+func offset_from_original() -> Vector2:
+	return position - original_position
+
+
+## 当前速度（每帧位移，未除以 delta —— Verlet 的固有表示）
+func velocity() -> Vector2:
+	return position - previous_position
+
+
+## 把质点瞬移回静止位置（复位用）
+func reset_to_original() -> void:
+	position = original_position
+	previous_position = original_position
+	max_offset_seen = 0.0
+
+
+## 设置钉住状态并同步 inv_mass
+func set_pinned(value: bool) -> void:
+	pinned = value
+	inv_mass = 0.0 if pinned else 1.0 / maxf(mass, 0.0001)
+
+
+## 换一个静止位置（例如网格整体搬家后）
+func set_original(pos: Vector2) -> void:
+	original_position = pos
+
+======================================================================
+// 文件: scripts/gd/soft/soft_solver.gd   (303 行)
+======================================================================
+## 软体求解器（SoftTouch 模块 · STEP 3 核心）
+##
+## 一帧的固定顺序（顺序错了会抖 / 会炸）：
+##   ① _integrate()         Verlet 惯性推进（含阻尼、重力）
+##   ② apply_pressure()     触点压力场：径向压入 + 拖动携带
+##      或 apply_recovery() 松手后用弹力拉回静止位置
+##   ③ solve_constraints()  迭代 N 次距离约束 —— 这一步才是「周边传播」的来源
+##   ④ _clamp_displacement() 单帧位移限幅，防数值爆炸
+##
+## 关键：③ 不是装饰。没有它，按哪只有哪动（像抹布上的一个洞）；
+## 有了它，A—B—C 连成的网会把力传出去，才是「软组织」。
+##
+## 本文件只做数学，不含渲染、不含 Live2D。
+
+class_name SoftSolver
+extends RefCounted
+
+## 默认迭代次数：越高越「硬/越不可拉长」，8 次是 2D 网格的常用值
+const DEFAULT_ITERATIONS := 8
+
+## 约束里存 {"a": 索引, "b": 索引, "rest": 静止长度}
+var particles: Array[SoftParticle] = []
+var constraints: Array = []
+
+# ---------- 全局物理参数 ----------
+## 速度阻尼（每帧乘一次）。0.96 ≈ 明显有黏性，1.0 = 无摩擦会一直晃
+var damping: float = 0.96
+## 重力（2D 向量）。桌面软体一般留 ZERO，交给回弹力收场
+var gravity: Vector2 = Vector2.ZERO
+## 约束迭代次数
+var iterations: int = DEFAULT_ITERATIONS
+## 约束刚度 0~1：1 = 完全不可拉伸（硬），0.5 = 有弹性
+var stiffness: float = 1.0
+
+## ★ 允许压缩（单向约束 / 像布与皮肤）
+##
+## 这是整套物理能否「凹下去」的关键开关。原因：
+##   径向向内压 = 把影响圈往中心挤。若约束是双向的（既抗拉又抗压），
+##   圆周方向的弹簧会被压到崩溃，约束必然奋力反抗 ——
+##   实测无论怎么调刚度/迭代，凹陷都只有 0.1px（等于压不动）。
+##   真实皮肤与布料是「抗拉不抗压」的：拉长会弹回，压短不反抗（会起褶）。
+##   所以这里默认 true：只做 max 距离约束（dist > rest 才拉回），允许局部压缩。
+##   形状的回弹交给 recovery 弹力与松手后的约束，不靠抗压。
+var allow_compression: bool = true
+
+## 核心半径：质点最多被压到离触点这么近，防止压成一个点（塌缩奇点）
+var core_radius: float = 8.0
+
+## ★ 锚定半径倍数（常驻回弹的"掩膜"范围）
+##
+## 这是让形变「局部化」的关键。理由：
+##   一个自由漂浮的网格被往里压时，单向约束会把邻点一个个拽进来，
+##   一路传到边界 —— 整块一起动（实测远端也动 8px = 整体收缩）。
+##   真实皮肤是长在身体上的：离触点远的地方几乎不动。
+##   所以回弹力改成「常驻 + 按离触点远近加权」：
+##     圈内(k≈0)  → 压力说了算，自由凹陷
+##     圈外(k=全额) → 牢牢锚在静止位置，谁也别想拖走它
+##     中间过渡带  → 两边都受力 = 自然的"周边被带动"
+##   松手后 infl=0，全场全额回弹 → 自动复原
+var anchor_scale: float = 1.6
+## 回弹强度（松手后朝静止位置拉的速度系数）
+var recovery: float = 4.0
+## 单帧位移上限（像素）。防止强参数下数值发散
+var max_step: float = 60.0
+## 压力场是否启用（关掉就纯弹性网格，可对比手感）
+var pressure_enabled: bool = true
+
+# ---------- 触点状态（由 SoftMesh / TouchManager 每帧喂进来）----------
+var touch_position: Vector2 = Vector2.ZERO
+var touch_active: bool = false
+var touch_radius: float = 100.0
+## 衰减指数，见 PressureField.falloff 说明
+var touch_power: float = 4.0
+## 拖动方向的「携带力」：抚摸时把网格顺着鼠标带过去
+var drag_velocity: Vector2 = Vector2.ZERO
+var drag_strength: float = 0.0
+## 向外推（true）还是向内压（false）。右键可用它做「揉开」
+var push_outward: bool = false
+
+# ---------- 压力模式 ----------
+## "target" = 位置式（推荐）：直接把受影响质点朝「凹陷目标位置」拉。
+##            凹陷深度 = depth 像素，与约束刚度无关，好调、稳定。
+## "force"  = 速度式：每帧注入速度。更「流体」，但实测在刚性约束网里
+##            99% 会被约束抵消（累计推 31px 只凹 1.3px），不推荐。
+var pressure_mode: String = "target"
+## target 模式下：触点中心的目标凹陷深度（画布像素）
+var depth: float = 42.0
+## target 模式下：每秒的跟随速率（越大越"瞬间凹进去"，越小越"慢慢压下去"）
+var follow_rate: float = 9.0
+## force 模式下的每帧推力（仅 pressure_mode == "force" 时有效）
+var touch_strength: float = 80.0
+
+
+## 绑定数据（每次都传引用，不复制数组——求解器必须直接改质点）
+func setup(particle_list: Array[SoftParticle], constraint_list: Array) -> void:
+	particles = particle_list
+	constraints = constraint_list
+
+
+## 一帧求解
+func step(delta: float) -> void:
+	if particles.is_empty():
+		return
+	_integrate(delta)
+	if touch_active and pressure_enabled:
+		apply_pressure(delta)
+	# 回弹是「常驻」的：按住时按影响场加权（圈外锚定、圈内自由），
+	# 松手后全额生效 → 自动复原。
+	apply_recovery(delta)
+	for _i in range(maxi(1, iterations)):
+		solve_constraints()
+	_clamp_displacement()
+
+
+# =====================================================================
+#  ① Verlet 惯性
+# =====================================================================
+func _integrate(delta: float) -> void:
+	var dt2: float = delta * delta
+	for p in particles:
+		if p.pinned:
+			p.previous_position = p.position
+			continue
+		var vel: Vector2 = p.position - p.previous_position
+		p.previous_position = p.position
+		p.position += vel * damping + gravity * dt2
+
+
+# =====================================================================
+#  ② 压力场（按住时）
+# =====================================================================
+## 两种模式，默认位置式。
+##
+## 【位置式 target】为什么要配 PBD 技巧：
+##   直接改 position 会让 Verlet 把「这一跳」当成速度，下一帧继续往前冲、来回震荡。
+##   所以移动多少，previous_position 也同步移动多少 —— 等于「这一帧不产生速度」，
+##   按下过程干净利落没有抖动；回弹完全交给松手后的弹簧与 recovery。
+func apply_pressure(delta: float) -> void:
+	var r: float = maxf(touch_radius, 0.0001)
+	var follow: float = clampf(1.0 - exp(-follow_rate * delta), 0.0, 1.0)
+	var sign_depth: float = depth if push_outward else -depth
+
+	for p in particles:
+		if p.pinned:
+			continue
+		var offset: Vector2 = p.position - touch_position
+		var d: float = offset.length()
+		if d >= r:
+			continue
+
+		var influence: float = PressureField.falloff(d, r, touch_power)
+		if influence <= 0.0:
+			continue
+
+		if pressure_mode == "target":
+			var dir := Vector2.ZERO
+			if d > 0.001:
+				dir = offset / d
+			# 目标半径：向内收 depth*衰减，但不小于 core_radius（防塌缩成一点）
+			var target_radius: float = maxf(d + sign_depth * influence, core_radius)
+			var target: Vector2 = touch_position + dir * target_radius
+			var move: Vector2 = (target - p.position) * follow
+			p.position += move
+			p.previous_position += move     # PBD：不注入虚假速度
+		else:
+			if d < 0.001:
+				continue
+			var dir2: Vector2 = offset / d
+			var sign_dir: float = 1.0 if push_outward else -1.0
+			p.position += dir2 * (sign_dir * touch_strength * influence * delta)
+
+		# 拖动携带：抚摸时顺鼠标方向带一小段（这一项是速度式的，故意保留惯性）
+		if drag_strength > 0.0 and drag_velocity != Vector2.ZERO:
+			p.position += drag_velocity * drag_strength * influence * delta
+
+		var off: float = p.offset_from_original().length()
+		if off > p.max_offset_seen:
+			p.max_offset_seen = off
+
+
+# =====================================================================
+#  ②' 常驻锚定 / 回弹
+# =====================================================================
+## 朝静止位置拉回，强度按「离触点多远」加权（见 anchor_scale 说明）。
+## 系数乘 delta 后夹到 1，避免低帧率 / 大 delta 时一步拉过头来回振荡。
+func apply_recovery(delta: float) -> void:
+	var base: float = clampf(recovery * delta, 0.0, 1.0)
+	if base <= 0.0:
+		return
+	var touching: bool = touch_active and pressure_enabled
+
+	for p in particles:
+		if p.pinned:
+			continue
+		var off: Vector2 = p.original_position - p.position
+		if off.length_squared() < 0.000001:
+			continue
+
+		var k: float = base
+		if touching:
+			var d: float = p.original_position.distance_to(touch_position)
+			k = base * _anchor_mask(d)
+			if k <= 0.0:
+				continue
+		p.position += off * k
+
+
+## 锚定掩膜：圈内(<=R)完全不锚，圈外(>=R*anchor_scale)全额锚定，中间 smoothstep 过渡。
+##
+## 为什么不用压力场那条 falloff 曲线：那条曲线在 d=0.3R 处已有 0.5 的强度，
+## 会把「本该凹得最深」的中心区也锚住（实测凹陷只剩 0.2px）。
+## 锚定要的是「圈外才管」，所以必须是 0 → 1 的硬边界 + 平滑过渡带。
+func _anchor_mask(d: float) -> float:
+	var r0: float = maxf(touch_radius, 0.0001)
+	var r1: float = maxf(touch_radius * anchor_scale, r0 + 0.001)
+	if d <= r0:
+		return 0.0
+	if d >= r1:
+		return 1.0
+	var t: float = (d - r0) / (r1 - r0)
+	return t * t * (3.0 - 2.0 * t)
+
+
+# =====================================================================
+#  ③ 距离约束（周边传播）
+# =====================================================================
+func solve_constraints() -> void:
+	var s: float = clampf(stiffness, 0.0, 1.0)
+	if s <= 0.0:
+		return
+	for c in constraints:
+		var ia: int = c["a"]
+		var ib: int = c["b"]
+		var rest: float = c["rest"]
+
+		var a: SoftParticle = particles[ia]
+		var b: SoftParticle = particles[ib]
+
+		var wsum: float = a.inv_mass + b.inv_mass
+		if wsum <= 0.0:
+			continue   # 两端都钉死，这条约束无自由度
+
+		var d: Vector2 = b.position - a.position
+		var dist: float = d.length()
+		if dist < 0.0001:
+			continue   # 完全重合，方向无意义（避免除零炸出 NaN）
+
+		# 单向（布/皮肤）：被压短时不反抗，只在被拉长时拉回
+		if allow_compression and dist < rest:
+			continue
+
+		var diff: float = (dist - rest) / dist
+		var correction: Vector2 = d * diff * s
+
+		if not a.pinned:
+			a.position += correction * (a.inv_mass / wsum)
+		if not b.pinned:
+			b.position -= correction * (b.inv_mass / wsum)
+
+
+# =====================================================================
+#  ④ 限幅（防炸）
+# =====================================================================
+func _clamp_displacement() -> void:
+	if max_step <= 0.0:
+		return
+	var m2: float = max_step * max_step
+	for p in particles:
+		if p.pinned:
+			continue
+		var d: Vector2 = p.position - p.previous_position
+		if d.length_squared() > m2:
+			p.position = p.previous_position + d.normalized() * max_step
+
+
+# =====================================================================
+#  对外工具
+# =====================================================================
+
+## 全部质点复位到静止位置，并清速度
+func reset() -> void:
+	for p in particles:
+		p.reset_to_original()
+
+
+## 当前最大位移（调试 / 自检用）
+func max_offset() -> float:
+	var m: float = 0.0
+	for p in particles:
+		m = maxf(m, p.offset_from_original().length())
+	return m
+
+
+## 触点处质点的平均位移方向（可用于驱动 Live2D 参数，如身体歪斜）
+func mean_offset_near(center: Vector2, radius: float) -> Vector2:
+	var sum: Vector2 = Vector2.ZERO
+	var n: int = 0
+	for p in particles:
+		if p.position.distance_to(center) < radius:
+			sum += p.offset_from_original()
+			n += 1
+	return Vector2.ZERO if n == 0 else sum / float(n)
+
+======================================================================
+// 文件: scripts/gd/soft/soft_test_runner.gd   (174 行)
+======================================================================
+## SoftPhysicsTest 场景控制器（SoftTouch 模块 · STEP 1 的验证场）
+##
+## 这一版**完全不碰 Live2D**：只有一个 2D 网格 + 鼠标。
+## 目的只有一个 —— 验证「按哪里，哪里变形」。
+## 如果这个基础物理都不自然，把 Live2D 搬进来也救不了。
+##
+## 全部节点在代码里搭（不依赖 .tscn 里的节点连线），所以这个场景很稳。
+##
+## 运行：
+##   J:\live2d_game\engine\Godot.exe --path J:\live2d_game res://scenes/SoftPhysicsTest.tscn
+## 或双击 J:\live2d_game\run_softtest.bat
+
+extends Node2D
+
+const GRID_SIZE := Vector2(500.0, 350.0)
+const VIEW := Vector2(640.0, 640.0)
+
+var mesh: SoftMesh
+var touch: TouchManager
+var hud: Label
+var bg: ColorRect
+
+# 对比开关
+var gravity_on: bool = false
+var field_on: bool = true
+
+
+func _ready() -> void:
+	_build_background()
+	_build_mesh()
+	_build_touch()
+	_build_hud()
+	print("[SoftPhysicsTest] 就绪：%d×%d 网格，%d 质点 / %d 约束"
+		% [mesh.columns, mesh.rows, mesh.particles.size(), mesh.constraints.size()])
+
+
+func _build_background() -> void:
+	bg = ColorRect.new()
+	bg.color = Color(0.055, 0.06, 0.085)
+	bg.size = VIEW
+	bg.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	var cl := CanvasLayer.new()
+	cl.layer = -10
+	add_child(cl)
+	cl.add_child(bg)
+
+
+func _build_mesh() -> void:
+	mesh = SoftMesh.new()
+	mesh.name = "SoftMesh"
+	mesh.columns = 20
+	mesh.rows = 14
+	mesh.mesh_size = GRID_SIZE
+	# 让网格居中（视图 640×640）
+	mesh.position = (VIEW - GRID_SIZE) * 0.5
+	mesh.pin_border = false
+	mesh.show_original_shape = true
+	add_child(mesh)
+
+
+func _build_touch() -> void:
+	touch = TouchManager.new()
+	touch.name = "TouchManager"
+	touch.space_node = mesh          # 坐标换算到网格局部坐标
+	touch.button = MOUSE_BUTTON_LEFT
+	touch.radius_min = 70.0
+	touch.radius_max = 150.0
+	touch.pressure_ramp_time = 0.45
+	add_child(touch)
+
+
+func _build_hud() -> void:
+	var cl := CanvasLayer.new()
+	cl.layer = 500
+	add_child(cl)
+	hud = Label.new()
+	hud.position = Vector2(14, 10)
+	hud.add_theme_font_size_override("font_size", 15)
+	hud.add_theme_color_override("font_color", Color(0.85, 0.9, 1.0))
+	cl.add_child(hud)
+
+
+func _process(_delta: float) -> void:
+	# 触点状态 -> 网格
+	if touch.active:
+		mesh.set_touch(touch.position, true, touch.velocity, touch.pressure, touch.radius)
+	else:
+		mesh.release()
+	_update_hud()
+
+
+func _update_hud() -> void:
+	var t: TouchManager = touch
+	var m: SoftMesh = mesh
+	var max_off: float = m.max_offset()
+	# 远端位移：触点影响半径之外应恒为 0（证明「不再整块矩形一起动」）
+	var far_off: float = _far_offset(t.position, t.radius * 1.5)
+	hud.text = "\n".join([
+		"SoftPhysicsTest   —   SoftTouch 软体原型 (STEP 1~3)",
+		"",
+		"按住鼠标左键 → 局部凹陷；松手 → 回弹",
+		"R 复位   G 重力=%s   P 钉边框=%s   C 压力场=%s" % [
+			"ON" if gravity_on else "OFF",
+			"ON" if m.pin_border else "OFF",
+			"ON" if field_on else "OFF"],
+		", / .  影响半径 = %.0f      - / =  衰减指数 = %.1f" % [t.radius, m.touch_power],
+		"[ / ]  网格密度 %d×%d      ESC 退出" % [m.columns, m.rows],
+		"",
+		"触点  模式=%s  压力=%.2f  半径=%.0f  速度=%.0f px/s" % [
+			"按下" if t.active else "松开", t.pressure, t.radius, t.velocity.length() * 60.0],
+		"变形  最大位移=%.1f px     半径外位移=%.2f px (应≈0)" % [max_off, far_off],
+		"网格  %d 质点 / %d 约束 / 迭代 %d 次" % [
+			m.particles.size(), m.constraints.size(), m.constraint_iterations],
+	])
+
+
+## 触点影响半径之外的质点的最大位移 —— 用于证明变形是局部的
+func _far_offset(center: Vector2, beyond: float) -> float:
+	var worst: float = 0.0
+	for p in mesh.particles:
+		if p.original_position.distance_to(center) <= beyond:
+			continue
+		worst = maxf(worst, p.offset_from_original().length())
+	return worst
+
+
+# =====================================================================
+#  交互
+# =====================================================================
+func _unhandled_input(event: InputEvent) -> void:
+	if not (event is InputEventKey) or not event.pressed or event.echo:
+		return
+	var k := (event as InputEventKey).keycode
+	match k:
+		KEY_ESCAPE:
+			get_tree().quit()
+		KEY_R:
+			mesh.reset()
+			print("[SoftPhysicsTest] 已复位")
+		KEY_G:
+			gravity_on = not gravity_on
+			mesh.gravity = Vector2(0, 900.0) if gravity_on else Vector2.ZERO
+		KEY_P:
+			mesh.pin_border = not mesh.pin_border
+			mesh.rebuild()
+		KEY_C:
+			field_on = not field_on
+			mesh.solver.pressure_enabled = field_on
+		KEY_COMMA:
+			touch.radius_min = maxf(20.0, touch.radius_min - 10.0)
+			touch.radius_max = maxf(touch.radius_min + 10.0, touch.radius_max - 10.0)
+		KEY_PERIOD:
+			touch.radius_min += 10.0
+			touch.radius_max += 10.0
+		KEY_MINUS:
+			mesh.touch_power = maxf(1.0, mesh.touch_power - 0.5)
+		KEY_EQUAL:
+			mesh.touch_power = minf(12.0, mesh.touch_power + 0.5)
+		KEY_BRACKETLEFT:
+			_resize_grid(-4)
+		KEY_BRACKETRIGHT:
+			_resize_grid(4)
+		_:
+			return
+	get_viewport().set_input_as_handled()
+
+
+func _resize_grid(d: int) -> void:
+	mesh.columns = clampi(mesh.columns + d, 6, 48)
+	mesh.rows = clampi(mesh.rows + int(round(float(d) * 0.7)), 4, 36)
+	mesh.rebuild()
+	print("[SoftPhysicsTest] 网格 -> %d×%d（%d 质点 / %d 约束）"
+		% [mesh.columns, mesh.rows, mesh.particles.size(), mesh.constraints.size()])
+
+======================================================================
+// 文件: scripts/gd/soft/touch_manager.gd   (178 行)
+======================================================================
+## SoftTouch 触点管理器（Live2D 版）
+##
+## 默认行为改为「鼠标悬停在模型表面 = 手指接触」，不要求按键。
+## 若 hover_touch=false，则退回左键按住模式。
+## hit_tester 负责回答「鼠标是否真的落在 Live2D 可见网格上」。
+
+class_name TouchManager
+extends Node
+
+signal touch_began(position: Vector2)
+signal touch_moved(position: Vector2, velocity: Vector2)
+signal touch_ended(position: Vector2)
+signal touch_held(position: Vector2, pressure: float, duration: float)
+
+@export var enabled: bool = true
+@export var follow_mouse: bool = true
+@export var space_node: Node2D = null
+@export var hit_tester: Node = null
+## true = 鼠标碰到模型就接触；false = 必须按住 button。
+@export var hover_touch: bool = true
+@export var button: MouseButton = MOUSE_BUTTON_LEFT
+
+@export_group("接触手感")
+## 接触压力从 0→1 的时间。建议 0.16~0.30，旧版 0.5 太慢。
+@export var pressure_ramp_time: float = 0.22
+@export var radius_min: float = 72.0
+@export var radius_max: float = 150.0
+
+@export_group("鼠标平滑")
+@export_range(0.01, 1.0, 0.01) var position_smoothing: float = 0.42
+@export_range(0.01, 1.0, 0.01) var velocity_smoothing: float = 0.35
+@export var velocity_deadzone: float = 5.0
+
+var active: bool = false
+var position: Vector2 = Vector2.ZERO
+var velocity: Vector2 = Vector2.ZERO
+var pressure: float = 0.0
+var duration: float = 0.0
+var radius: float = 72.0
+
+var _last_vp_pos: Vector2 = Vector2.ZERO
+var _last_space_pos: Vector2 = Vector2.ZERO
+var _was_contact: bool = false
+var _prev_pressure: float = 0.0
+
+func _ready() -> void:
+	set_process(true)
+
+func _process(delta: float) -> void:
+	if not enabled:
+		if active:
+			_ended(_last_vp_pos)
+		return
+
+	var vp_pos: Vector2 = get_viewport().get_mouse_position()
+	var button_down: bool = Input.is_mouse_button_pressed(button)
+	var contact: bool = false
+
+	if follow_mouse:
+		if hover_touch:
+			var space_pos := to_space(vp_pos)
+			contact = _test_contact(space_pos)
+		else:
+			contact = button_down
+
+	if contact and not _was_contact:
+		_began(vp_pos)
+	elif not contact and _was_contact:
+		_ended(vp_pos)
+
+	if active:
+		# ⚠ 只有 follow_mouse 打开时才跟随真实鼠标。
+		#   否则（headless / simulate_* / force_state 注入）会把注入的触点
+		#   又插值回真实鼠标位置，注入等于失效。
+		if follow_mouse:
+			var target_pos := to_space(vp_pos)
+			if position_smoothing < 1.0:
+				position = position.lerp(target_pos, clampf(position_smoothing, 0.0, 1.0))
+			else:
+				position = target_pos
+
+			var raw_v: Vector2 = (position - _last_space_pos) / maxf(delta, 0.0001)
+			velocity = velocity.lerp(raw_v, clampf(velocity_smoothing, 0.0, 1.0))
+			if velocity.length() < velocity_deadzone:
+				velocity = Vector2.ZERO
+
+		duration += delta
+		var ramp: float = maxf(pressure_ramp_time, 0.0001)
+		pressure = clampf(duration / ramp, 0.0, 1.0)
+		radius = lerpf(radius_min, radius_max, pressure)
+
+		if velocity != Vector2.ZERO:
+			touch_moved.emit(position, velocity)
+		if pressure >= 1.0 and _prev_pressure < 1.0:
+			touch_held.emit(position, pressure, duration)
+		_prev_pressure = pressure
+
+	_last_space_pos = position
+	_last_vp_pos = vp_pos
+	_was_contact = contact
+
+func _test_contact(space_pos: Vector2) -> bool:
+	if hit_tester == null or not is_instance_valid(hit_tester):
+		return true
+	if hit_tester.has_method("is_point_on_model"):
+		return bool(hit_tester.call("is_point_on_model", space_pos))
+	return true
+
+func _began(vp_pos: Vector2) -> void:
+	active = true
+	duration = 0.0
+	pressure = 0.0
+	radius = radius_min
+	position = to_space(vp_pos)
+	_last_space_pos = position
+	velocity = Vector2.ZERO
+	touch_began.emit(position)
+
+func _ended(_vp_pos: Vector2) -> void:
+	var end_pos := position
+	active = false
+	pressure = 0.0
+	radius = radius_min
+	velocity = Vector2.ZERO
+	_prev_pressure = 0.0
+	touch_ended.emit(end_pos)
+
+## 屏幕坐标 → 模型坐标（STEP 3 抽成纯函数，便于 headless 测试；
+## 算式与原来完全一致，只是把两个变换显式传进来）
+##   world = canvas_transform.affine_inverse() * vp_pos   ← 相机 / 画布缩放（Camera2D.zoom）
+##   model = space_transform.affine_inverse() * world     ← 模型节点自身的 transform
+static func screen_to_model(vp_pos: Vector2, canvas_transform: Transform2D,
+		space_transform: Transform2D) -> Vector2:
+	return space_transform.affine_inverse() * (canvas_transform.affine_inverse() * vp_pos)
+
+
+func to_space(vp_pos: Vector2) -> Vector2:
+	if space_node == null or not is_instance_valid(space_node):
+		return vp_pos
+	var vp := get_viewport()
+	if vp == null:
+		return vp_pos
+	return screen_to_model(vp_pos, vp.get_canvas_transform(), space_node.get_global_transform())
+
+func simulate_press(vp_pos: Vector2) -> void:
+	follow_mouse = false
+	_was_contact = true
+	_began(vp_pos)
+
+func simulate_move(vp_pos: Vector2, delta: float = 0.016) -> void:
+	follow_mouse = false
+	var prev: Vector2 = position
+	position = to_space(vp_pos)
+	var raw_v: Vector2 = (position - prev) / maxf(delta, 0.0001)
+	velocity = velocity.lerp(raw_v, clampf(velocity_smoothing, 0.0, 1.0))
+	duration += delta
+	var ramp: float = maxf(pressure_ramp_time, 0.0001)
+	pressure = clampf(duration / ramp, 0.0, 1.0)
+	radius = lerpf(radius_min, radius_max, pressure)
+
+func simulate_release() -> void:
+	_ended(_last_vp_pos)
+	_was_contact = false
+
+## 直接设定触点状态（测试 / 注入用）。
+## 会同时关掉 follow_mouse，否则下一帧就会被真实鼠标位置覆盖。
+func force_state(pos: Vector2, is_active: bool, press: float = 1.0, r: float = 90.0) -> void:
+	follow_mouse = false
+	active = is_active
+	position = pos
+	pressure = press
+	radius = r
+	if is_active:
+		duration = press * pressure_ramp_time
+	else:
+		duration = 0.0
+		velocity = Vector2.ZERO
+
+======================================================================
+// 附: scenes/main.tscn 中抚摸相关节点块摘录（其余节点省略）
+======================================================================
+[node name="SoftTouch" type="Node" parent="." node_paths=PackedStringArray("space_node", "hit_tester")]
+script = ExtResource("26_soft_touch")
+space_node = NodePath("GDCubismUserModel")
+hit_tester = NodePath("GDCubismUserModel/SoftMeshDeformer")
+hover_touch = true
+pressure_ramp_time = 0.22
+radius_min = 72.0
+radius_max = 150.0
+position_smoothing = 0.42
+velocity_smoothing = 0.35
+
+[node name="HandRig" type="Node" parent="." node_paths=PackedStringArray("touch")]
+script = ExtResource("28_soft_hand")
+touch = NodePath("../SoftTouch")
+enabled = true
+auto_update = true
+palm_radius = 92.0
+palm_forward_offset = 0.0
+palm_weight = 1.0
+finger_count = 3
+finger_radius = 25.0
+finger_spacing = 40.0
+finger_distance = 92.0
+finger_fan_back = 10.0
+finger_weight = 0.78
+thumb_enabled = false
+thumb_radius = 30.0
+thumb_along = -26.0
+thumb_side = 62.0
+thumb_weight = 0.8
+thumb_direction_deg = 135.0
+direction_smoothing = 0.18
+direction_deadzone = 14.0
+fallback_direction = Vector2(1, 0)
+
+[node name="SoftMeshDeformer" type="GDCubismEffectCustom" parent="GDCubismUserModel" node_paths=PackedStringArray("touch", "hand_rig")]
+script = ExtResource("27_soft_deformer")
+touch = NodePath("../../SoftTouch")
+hand_rig = NodePath("../../HandRig")
+use_hand_rig = true
+enabled = true
+radius = 190.0
+depth = 42.0
+flat_top = 0.34
+power = 1.8
+cross_limit = 0.8
+volume_compensation = 0.13
+drag_amount = 0.22
+spring_strength = 34.0
+spring_damping = 0.78
+recovery_strength = 22.0
+recovery_damping = 0.82
+max_displacement = 85.0
+only_visible = true
+deform_neighbor_meshes = true
+mesh_search_margin = 1.25
+
+[node name="ShadowField" type="Node2D" parent="GDCubismUserModel" node_paths=PackedStringArray("hand_rig", "touch")]
+script = ExtResource("29_shadow_field")
+hand_rig = NodePath("../../HandRig")
+touch = NodePath("../../SoftTouch")
+palm_texture = ExtResource("30_sh_palm")
+finger_textures = Array[Texture2D]([ExtResource("31_sh_f1"), ExtResource("32_sh_f2"), ExtResource("33_sh_f3"), ExtResource("34_sh_f4"), ExtResource("35_sh_f5")])
+brush_z_index = 100
+fallback_radius = 190.0
